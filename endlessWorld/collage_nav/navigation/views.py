@@ -1,0 +1,713 @@
+from django.shortcuts import render, redirect, get_object_or_404
+from django.contrib.auth import login, authenticate, logout
+from django.contrib.auth.decorators import login_required
+from django.contrib.admin.views.decorators import staff_member_required
+from django.contrib import messages
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+from django.core.paginator import Paginator
+from django.db.models import Q, F
+from django.contrib.gis.geos import Point
+from django.contrib.gis.measure import Distance
+from django.contrib.gis.db.models.functions import Distance as DistanceFunction
+from django.utils import timezone
+from datetime import datetime, timedelta
+import json
+import random
+import string
+import folium
+from folium import plugins
+from .models import *
+from .forms import *
+from .utils import send_sms, calculate_route
+
+def home(request):
+    """Home page - redirect to dashboard if authenticated"""
+    if request.user.is_authenticated:
+        return redirect('dashboard')
+    return redirect('login')
+
+def register_view(request):
+    """User registration with SMS verification"""
+    if request.method == 'POST':
+        form = CustomUserRegistrationForm(request.POST)
+        if form.is_valid():
+            user = form.save()
+            
+            # Send verification SMS
+            message = f"Welcome to College Navigation! Your verification code is: {user.verification_token}"
+            sms_sent = send_sms(user.phone_number, message)
+            
+            if sms_sent:
+                # Create SMS alert record
+                SMSAlert.objects.create(
+                    user=user,
+                    message=message,
+                    alert_type='verification',
+                    is_sent=True,
+                    sent_at=timezone.now()
+                )
+                messages.success(request, 'Registration successful! Please check your phone for verification code.')
+                return redirect('verify_token', user_id=user.id)
+            else:
+                messages.error(request, 'Registration successful, but SMS could not be sent. Please contact admin.')
+                return redirect('login')
+    else:
+        form = CustomUserRegistrationForm()
+    
+    return render(request, 'register.html', {'form': form})
+
+def login_view(request):
+    """User login"""
+    if request.method == 'POST':
+        form = CustomLoginForm(request, data=request.POST)
+        if form.is_valid():
+            username = form.cleaned_data.get('username')
+            password = form.cleaned_data.get('password')
+            user = authenticate(username=username, password=password)
+            
+            if user and user.is_verified:
+                login(request, user)
+                messages.success(request, f'Welcome back, {user.first_name}!')
+                return redirect('dashboard')
+            elif user and not user.is_verified:
+                messages.error(request, 'Please verify your account first.')
+                return redirect('verify_token', user_id=user.id)
+            else:
+                messages.error(request, 'Invalid credentials.')
+    else:
+        form = CustomLoginForm()
+    
+    return render(request, 'login.html', {'form': form})
+
+@login_required
+def logout_view(request):
+    """User logout - THIS WAS MISSING!"""
+    user_name = request.user.first_name or request.user.username
+    logout(request)
+    messages.success(request, f'Goodbye {user_name}! You have been logged out successfully.')
+    return redirect('login')
+
+def verify_token_view(request, user_id):
+    """Verify SMS token"""
+    user = get_object_or_404(CustomUser, id=user_id)
+    
+    if request.method == 'POST':
+        form = TokenVerificationForm(request.POST)
+        if form.is_valid():
+            token = form.cleaned_data['token']
+            
+            if user.verification_token == token:
+                user.is_verified = True
+                user.verification_token = None
+                user.save()
+                
+                # Send welcome SMS after verification
+                welcome_message = f"Welcome {user.first_name}! Your College Navigation account is now active. You can now access all features including real-time directions and location alerts."
+                send_sms(user.phone_number, welcome_message)
+                
+                SMSAlert.objects.create(
+                    user=user,
+                    message=welcome_message,
+                    alert_type='welcome',
+                    is_sent=True,
+                    sent_at=timezone.now()
+                )
+                
+                messages.success(request, 'Account verified successfully! You can now log in.')
+                return redirect('login')
+            else:
+                messages.error(request, 'Invalid verification code.')
+    else:
+        form = TokenVerificationForm()
+    
+    return render(request, 'verify_token.html', {'form': form, 'user': user})
+
+def generate_restricted_campus_map(user_location=None, nearby_locations=None):
+    """Generate a restricted campus map using Folium for CoICT-UDSM with strict bounds"""
+    
+    # Exact CoICT center coordinates
+    CENTER_LAT = -6.771204359255421
+    CENTER_LON = 39.24001333969674
+    
+    # Calculate bounds for 0.13 mile radius (approx. 209 meters)
+    RADIUS_MILES = 0.13
+    RADIUS_METERS = RADIUS_MILES * 1609.34  # Convert miles to meters
+    
+    # Create map centered on CoICT with full-screen settings
+    campus_map = folium.Map(
+        location=[CENTER_LAT, CENTER_LON],
+        zoom_start=16,
+        min_zoom=15,
+        max_zoom=20,
+        tiles='OpenStreetMap',
+        attr='© OpenStreetMap contributors',
+        control_scale=True,
+        prefer_canvas=True,  # Better performance for many markers
+    )
+    
+    # Set map to occupy full container
+    campus_map.get_root().width = "100%"
+    campus_map.get_root().height = "100%"
+    
+    # Calculate bounds for strict restriction
+    bounds = [
+        [CENTER_LAT - 0.002, CENTER_LON - 0.002],  # SW corner
+        [CENTER_LAT + 0.002, CENTER_LON + 0.002]   # NE corner
+    ]
+    
+    # Add strict boundary rectangle
+    folium.Rectangle(
+        bounds=bounds,
+        color='#1e3a8a',
+        weight=2,
+        fill=True,
+        fill_color='#1e3a8a',
+        fill_opacity=0.1,
+        popup='CoICT Campus Boundary'
+    ).add_to(campus_map)
+    
+    # Add center marker
+    folium.Marker(
+        location=[CENTER_LAT, CENTER_LON],
+        popup='<b>CoICT Center</b><br>University of Dar es Salaam',
+        icon=folium.Icon(color='blue', icon='university', prefix='fa')
+    ).add_to(campus_map)
+    
+    # Add user location if within bounds
+    if user_location:
+        user_lat = user_location.y
+        user_lon = user_location.x
+        
+        # Check if within bounds
+        if (bounds[0][0] <= user_lat <= bounds[1][0] and 
+            bounds[0][1] <= user_lon <= bounds[1][1]):
+            
+            folium.Marker(
+                location=[user_lat, user_lon],
+                popup='<b>Your Location</b><br>Within CoICT Campus',
+                icon=folium.Icon(color='red', icon='user', prefix='fa')
+            ).add_to(campus_map)
+    
+    # Add nearby locations only if within bounds
+    if nearby_locations:
+        for location in nearby_locations:
+            if location.coordinates:
+                lat = location.coordinates.y
+                lon = location.coordinates.x
+                
+                # Check if within bounds
+                if (bounds[0][0] <= lat <= bounds[1][0] and 
+                    bounds[0][1] <= lon <= bounds[1][1]):
+                    
+                    folium.Marker(
+                        location=[lat, lon],
+                        popup=f'<b>{location.name}</b><br>{location.get_location_type_display()}',
+                        icon=folium.Icon(color='green', icon='map-marker')
+                    ).add_to(campus_map)
+    
+    # Add JavaScript to enforce strict bounds and full-screen behavior
+    bounds_js = f"""
+    // Define strict bounds
+    var strictBounds = L.latLngBounds(
+        L.latLng({bounds[0][0]}, {bounds[0][1]}),
+        L.latLng({bounds[1][0]}, {bounds[1][1]})
+    );
+    
+    // Apply bounds immediately
+    if (typeof window.map_{campus_map._id} !== 'undefined') {{
+        // Make map full screen
+        document.getElementById('{campus_map.get_name()}').style.width = '100%';
+        document.getElementById('{campus_map.get_name()}').style.height = '100%';
+        
+        // Apply strict bounds
+        window.map_{campus_map._id}.setMaxBounds(strictBounds);
+        window.map_{campus_map._id}.options.maxBoundsViscosity = 1.0;
+        
+        // Disable dragging outside bounds
+        window.map_{campus_map._id}.on('drag', function() {{
+            window.map_{campus_map._id}.panInsideBounds(strictBounds, {{animate: false}});
+        }});
+        
+        // Add boundary info
+        var boundaryInfo = L.control({{position: 'topright'}});
+        boundaryInfo.onAdd = function(map) {{
+            var div = L.DomUtil.create('div', 'boundary-info');
+            div.innerHTML = `
+                <div style="background: white; padding: 8px; border-radius: 4px; 
+                            box-shadow: 0 2px 4px rgba(0,0,0,0.2); font-size: 12px;
+                            max-width: 200px;">
+                    <strong>CoICT Campus Boundary</strong>
+                    <div style="margin-top: 4px; color: #666;">
+                        Only locations within this area are shown
+                    </div>
+                </div>
+            `;
+            return div;
+        }};
+        boundaryInfo.addTo(window.map_{campus_map._id});
+    }}
+    """
+    
+    campus_map.get_root().html.add_child(folium.Element(f"<script>{bounds_js}</script>"))
+    
+    # Add CSS for full-screen behavior
+    map_css = """
+    <style>
+    .folium-map {
+        width: 100% !important;
+        height: 100% !important;
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+        z-index: 1;
+    }
+    .boundary-info {
+        z-index: 1000;
+    }
+    </style>
+    """
+    campus_map.get_root().html.add_child(folium.Element(map_css))
+    
+    return campus_map._repr_html_()
+
+@login_required
+def dashboard_view(request):
+    """Main dashboard with restricted campus map and recommendations"""
+    # Get nearby locations for recommendations
+    user_location = None
+    nearby_locations = []
+    recommendations = []
+    
+    # Get user's last known location or use default college center
+    try:
+        user_location_obj = UserLocation.objects.filter(user=request.user).latest('timestamp')
+        user_location = user_location_obj.location
+        # Ensure SRID is set for existing location
+        if user_location and not user_location.srid:
+            user_location.srid = 4326
+    except UserLocation.DoesNotExist:
+        # Default to college center (Dar es Salaam coordinates) with SRID
+        user_location = Point(39.23999216661627, -6.771396137358294, srid=4326)  # Point(longitude, latitude)
+    
+    if user_location:
+        # Find nearby locations within campus area (5km radius to include full campus)
+        nearby_locations_queryset = Location.objects.annotate(
+            distance=DistanceFunction('coordinates', user_location)
+        ).filter(
+            coordinates__distance_lte=(user_location, Distance(km=5))
+        ).order_by('distance')
+        
+        # Generate smart recommendations based on user preferences and time
+        current_hour = timezone.now().hour
+        recommendations = get_smart_recommendations(request.user, nearby_locations_queryset, current_hour)
+        
+        # Get locations for display (limit to prevent overcrowding)
+        nearby_locations = nearby_locations_queryset[:50]  # Show more locations since we're restricting to campus
+    
+    # Get recent searches
+    recent_searches = UserSearch.objects.filter(user=request.user).order_by('-timestamp')[:5]
+    
+    # Generate restricted campus map HTML
+    map_html = generate_restricted_campus_map(user_location, nearby_locations)
+    
+    # Get user preferences for theme, zoom, etc.
+    user_preferences = get_user_preferences(request.user)
+    
+    context = {
+        'nearby_locations': nearby_locations,
+        'recommendations': recommendations,
+        'recent_searches': recent_searches,
+        'map_html': map_html,
+        'user_location': user_location,
+        'user_preferences': user_preferences,
+        'total_locations': nearby_locations.count() if nearby_locations else 0,
+    }
+    
+    return render(request, 'dashboard.html', context)
+
+@login_required
+def search_locations(request):
+    """Search for locations via AJAX with enhanced functionality"""
+    query = request.GET.get('q', '')
+    
+    if len(query) < 2:
+        return JsonResponse({'locations': []})
+    
+    # Enhanced search including fuzzy matching
+    locations = Location.objects.filter(
+        Q(name__icontains=query) | 
+        Q(description__icontains=query) |
+        Q(location_type__icontains=query) |
+        Q(address__icontains=query)
+    ).values(
+        'location_id', 'name', 'location_type', 
+        'description', 'address', 'coordinates'
+    )[:15]
+    
+    # Save search query with metadata
+    if query:
+        UserSearch.objects.create(
+            user=request.user,
+            search_query=query,
+            timestamp=timezone.now(),
+            results_count=locations.count()
+        )
+    
+    # Convert coordinates for JSON response
+    locations_list = []
+    for loc in locations:
+        loc_dict = dict(loc)
+        if loc['coordinates']:
+            loc_dict['latitude'] = loc['coordinates'].y
+            loc_dict['longitude'] = loc['coordinates'].x
+            del loc_dict['coordinates']
+        locations_list.append(loc_dict)
+    
+    return JsonResponse({'locations': locations_list})
+
+@login_required
+def get_directions(request):
+    """Get directions between two points with route optimization"""
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        from_location_id = data.get('from')
+        to_location_id = data.get('to')
+        transport_mode = data.get('mode', 'walking')  # walking, driving, cycling
+        
+        try:
+            from_location = Location.objects.get(location_id=from_location_id)
+            to_location = Location.objects.get(location_id=to_location_id)
+            
+            # Calculate route with transport mode
+            route_data = calculate_route(from_location, to_location, transport_mode)
+            
+            # Save route request for analytics
+            RouteRequest.objects.create(
+                user=request.user,
+                from_location=from_location,
+                to_location=to_location,
+                transport_mode=transport_mode,
+                timestamp=timezone.now()
+            )
+            
+            # Send SMS notification if enabled and route is long
+            if (request.user.notifications_enabled and 
+                route_data.get('distance', 0) > 2000):  # > 2km
+                
+                message = f"Route to {to_location.name} is {route_data['distance']}m. Estimated time: {route_data['duration']} minutes. Stay safe!"
+                send_sms(request.user.phone_number, message)
+                
+                SMSAlert.objects.create(
+                    user=request.user,
+                    message=message,
+                    alert_type='navigation',
+                    is_sent=True,
+                    sent_at=timezone.now()
+                )
+            
+            return JsonResponse({
+                'success': True,
+                'route': route_data
+            })
+            
+        except Location.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'error': 'Location not found'
+            })
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'error': str(e)
+            })
+    
+    return JsonResponse({'success': False, 'error': 'Invalid request method'})
+
+@login_required
+def profile_view(request):
+    """User profile management with enhanced features"""
+    if request.method == 'POST':
+        form = ProfileUpdateForm(request.POST, request.FILES, instance=request.user)
+        if form.is_valid():
+            user = form.save()
+            
+            # Send profile update confirmation SMS
+            if user.notifications_enabled:
+                message = f"Hi {user.first_name}! Your profile has been updated successfully."
+                send_sms(user.phone_number, message)
+                
+                SMSAlert.objects.create(
+                    user=user,
+                    message=message,
+                    alert_type='profile_update',
+                    is_sent=True,
+                    sent_at=timezone.now()
+                )
+            
+            messages.success(request, 'Profile updated successfully!')
+            return redirect('profile')
+    else:
+        form = ProfileUpdateForm(instance=request.user)
+    
+    # Get user statistics
+    user_stats = {
+        'total_searches': UserSearch.objects.filter(user=request.user).count(),
+        'total_routes': RouteRequest.objects.filter(user=request.user).count(),
+        'total_alerts': SMSAlert.objects.filter(user=request.user).count(),
+        'member_since': request.user.date_joined,
+    }
+    
+    return render(request, 'profile.html', {
+        'form': form,
+        'user_stats': user_stats
+    })
+
+def password_reset_request(request):
+    """Request password reset via SMS"""
+    if request.method == 'POST':
+        form = PasswordResetRequestForm(request.POST)
+        if form.is_valid():
+            phone_number = form.cleaned_data['phone_number']
+            
+            try:
+                user = CustomUser.objects.get(phone_number=phone_number)
+                
+                # Generate reset token
+                reset_token = ''.join(random.choices(string.digits, k=6))
+                user.verification_token = reset_token
+                user.token_created_at = timezone.now()
+                user.save()
+                
+                # Send SMS
+                message = f"Password reset for College Navigation. Your reset code is: {reset_token}. This code expires in 15 minutes. If you didn't request this, please ignore."
+                sms_sent = send_sms(phone_number, message)
+                
+                if sms_sent:
+                    SMSAlert.objects.create(
+                        user=user,
+                        message=message,
+                        alert_type='password_reset',
+                        is_sent=True,
+                        sent_at=timezone.now()
+                    )
+                    messages.success(request, 'Reset code sent to your phone! Check your messages.')
+                    return redirect('password_reset_verify', user_id=user.id)
+                else:
+                    messages.error(request, 'Could not send SMS. Please try again or contact support.')
+                    
+            except CustomUser.DoesNotExist:
+                # Don't reveal if user exists or not for security
+                messages.success(request, 'If this phone number is registered, you will receive a reset code.')
+    else:
+        form = PasswordResetRequestForm()
+    
+    return render(request, 'password_reset_request.html', {'form': form})
+
+def password_reset_verify(request, user_id):
+    """Verify reset token and set new password"""
+    user = get_object_or_404(CustomUser, id=user_id)
+    
+    # Check if token is expired (15 minutes)
+    if user.token_created_at and timezone.now() > user.token_created_at + timedelta(minutes=15):
+        messages.error(request, 'Reset code has expired. Please request a new one.')
+        return redirect('password_reset_request')
+    
+    if request.method == 'POST':
+        token = request.POST.get('token')
+        new_password = request.POST.get('new_password')
+        confirm_password = request.POST.get('confirm_password')
+        
+        if user.verification_token == token:
+            if new_password == confirm_password and len(new_password) >= 8:
+                user.set_password(new_password)
+                user.verification_token = None
+                user.token_created_at = None
+                user.save()
+                
+                # Send confirmation SMS
+                message = f"Hi {user.first_name}! Your password has been reset successfully. If this wasn't you, please contact support immediately."
+                send_sms(user.phone_number, message)
+                
+                SMSAlert.objects.create(
+                    user=user,
+                    message=message,
+                    alert_type='password_changed',
+                    is_sent=True,
+                    sent_at=timezone.now()
+                )
+                
+                messages.success(request, 'Password reset successfully! You can now log in with your new password.')
+                return redirect('login')
+            else:
+                messages.error(request, 'Passwords do not match or are too short (minimum 8 characters).')
+        else:
+            messages.error(request, 'Invalid reset code. Please check and try again.')
+    
+    return render(request, 'password_reset_verify.html', {'user': user})
+
+@login_required
+def update_location(request):
+    """Update user's current location with geofence checking"""
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        latitude = data.get('latitude')
+        longitude = data.get('longitude')
+        accuracy = data.get('accuracy', 0)
+        
+        if latitude and longitude:
+            location = Point(longitude, latitude)  # Note: Point(x, y) = Point(lng, lat)
+            
+            # Save user location
+            user_location = UserLocation.objects.create(
+                user=request.user,
+                location=location,
+                accuracy=accuracy,
+                timestamp=timezone.now()
+            )
+            
+            # Check geofences for alerts
+            check_geofences(request.user, location)
+            
+            # Clean up old location records (keep only last 50)
+            old_locations = UserLocation.objects.filter(
+                user=request.user
+            ).order_by('-timestamp')[50:]
+            
+            if old_locations:
+                UserLocation.objects.filter(
+                    id__in=[loc.id for loc in old_locations]
+                ).delete()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Location updated successfully'
+            })
+    
+    return JsonResponse({
+        'success': False,
+        'error': 'Invalid location data'
+    })
+
+def check_geofences(user, location):
+    """Check if user entered/exited any geofences and send alerts"""
+    active_geofences = Geofence.objects.filter(is_active=True)
+    
+    for geofence in active_geofences:
+        is_inside = geofence.boundary.contains(location)
+        
+        # Check if this is a new entry/exit
+        last_status = GeofenceEntry.objects.filter(
+            user=user,
+            geofence=geofence
+        ).order_by('-timestamp').first()
+        
+        if is_inside and (not last_status or not last_status.is_inside):
+            # User entered geofence
+            if geofence.trigger_type in ['entry', 'both']:
+                message = f"Welcome to {geofence.name}! {geofence.description}"
+                
+                if user.notifications_enabled:
+                    send_sms(user.phone_number, message)
+                    
+                    SMSAlert.objects.create(
+                        user=user,
+                        message=message,
+                        alert_type='geofence_entry',
+                        is_sent=True,
+                        sent_at=timezone.now()
+                    )
+                
+                # Record the entry
+                GeofenceEntry.objects.create(
+                    user=user,
+                    geofence=geofence,
+                    is_inside=True,
+                    timestamp=timezone.now()
+                )
+                
+        elif not is_inside and last_status and last_status.is_inside:
+            # User exited geofence
+            if geofence.trigger_type in ['exit', 'both']:
+                message = f"You have left {geofence.name}. Thank you for visiting!"
+                
+                if user.notifications_enabled:
+                    send_sms(user.phone_number, message)
+                    
+                    SMSAlert.objects.create(
+                        user=user,
+                        message=message,
+                        alert_type='geofence_exit',
+                        is_sent=True,
+                        sent_at=timezone.now()
+                    )
+                
+                # Record the exit
+                GeofenceEntry.objects.create(
+                    user=user,
+                    geofence=geofence,
+                    is_inside=False,
+                    timestamp=timezone.now()
+                )
+
+@login_required
+def update_preferences(request):
+    """Update user preferences (theme, notifications, etc.)"""
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        
+        user = request.user
+        user.theme_preference = data.get('theme', 'light')
+        user.map_zoom_level = data.get('zoom_level', 15)
+        user.notifications_enabled = data.get('notifications', True)
+        user.location_sharing = data.get('location_sharing', True)
+        user.save()
+        
+        return JsonResponse({
+            'success': True,
+            'message': 'Preferences updated successfully'
+        })
+    
+    return JsonResponse({'success': False})
+
+# Helper functions
+def get_smart_recommendations(user, nearby_locations, current_hour):
+    """Generate smart recommendations based on time and user behavior"""
+    recommendations = []
+    
+    # Time-based recommendations
+    if 7 <= current_hour <= 11:  # Morning
+        priority_types = ['library', 'cafeteria', 'lecture_hall']
+    elif 12 <= current_hour <= 14:  # Lunch time
+        priority_types = ['cafeteria', 'restaurant', 'food_court']
+    elif 15 <= current_hour <= 18:  # Afternoon
+        priority_types = ['library', 'study_room', 'lab']
+    else:  # Evening/Night
+        priority_types = ['dormitory', 'security', 'parking']
+    
+    # Get recommendations based on priority types
+    for location_type in priority_types:
+        matching_locations = nearby_locations.filter(location_type=location_type)[:2]
+        for location in matching_locations:
+            try:
+                recommendation = Recommendation.objects.get(location=location)
+                recommendations.append(recommendation)
+            except Recommendation.DoesNotExist:
+                # Create a basic recommendation if none exists
+                recommendations.append({
+                    'location': location,
+                    'reason': f'Popular {location_type} nearby',
+                    'rating': 4.0
+                })
+    
+    return recommendations[:6]
+
+def get_user_preferences(user):
+    """Get user preferences with defaults"""
+    return {
+        'theme': getattr(user, 'theme_preference', 'light'),
+        'zoom_level': getattr(user, 'map_zoom_level', 15),
+        'notifications_enabled': getattr(user, 'notifications_enabled', True),
+        'location_sharing': getattr(user, 'location_sharing', True),
+    }

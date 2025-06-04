@@ -1,0 +1,46 @@
+{% extends 'base.html' %}
+{% load crispy_forms_tags %}
+
+{% block title %}Verify Account{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header bg-primary text-white">
+                <h4 class="mb-0"><i class="fas fa-mobile-alt"></i> Verify Account</h4>
+            </div>
+            <div class="card-body">
+                <p>We've sent a 6-digit verification code to your phone number. Please enter it below:</p>
+                <form method="post">
+                    {% csrf_token %}
+                    {{ form|crispy }}
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-primary">Verify</button>
+                    </div>
+                </form>
+                <hr>
+                <p class="text-muted">Didn't receive the code? <a href="#" onclick="resendCode({{ user.id }})">Resend code</a></p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    function resendCode(userId) {
+        fetch(`/resend-code/${userId}/`, {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': '{{ csrf_token }}'
+            }
+        }).then(response => response.json())
+          .then(data => {
+              if (data.success) {
+                  alert('New verification code sent!');
+              } else {
+                  alert('Error: ' + (data.error || 'Could not resend code'));
+              }
+          });
+    }
+</script>
+{% endblock %}

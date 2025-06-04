@@ -1,0 +1,252 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-4">
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5><i class="fas fa-search"></i> Search Locations</h5>
+            </div>
+            <div class="card-body">
+                <form id="searchForm">
+                    <div class="input-group mb-3">
+                        <input type="text" class="form-control" placeholder="Search for locations..." id="searchInput">
+                        <button class="btn btn-primary" type="submit"><i class="fas fa-search"></i></button>
+                    </div>
+                </form>
+                
+                <div id="searchResults" class="list-group" style="max-height: 300px; overflow-y: auto;"></div>
+            </div>
+        </div>
+
+        <!--Recent search suggestions-->
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5><i class="fas fa-clock"></i> Recent Searches</h5>
+            </div>
+            <div class="card-body">
+                {% if recent_searches %}
+                <ul class="list-group">
+                    {% for search in recent_searches %}
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                        {{ search.search_query }}
+                        <span class="badge bg-secondary">{{ search.timestamp|timesince }} ago</span>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <p class="text-muted">No recent searches</p>
+                {% endif %}
+            </div>
+        </div>
+        
+        <!--Show Recommmendations-->
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5><i class="fas fa-lightbulb"></i> Recommendations</h5>
+            </div>
+            <div class="card-body">
+                {% if recommendations %}
+                <div class="list-group">
+                    {% for rec in recommendations %}
+                    <a href="#" class="list-group-item list-group-item-action" 
+                       onclick="showLocation('{{ rec.recommended_location.location_id }}')">
+                        <div class="d-flex w-100 justify-content-between">
+                            <h6 class="mb-1">{{ rec.recommended_location.name }}</h6>
+                            <small>{{ rec.reason }}</small>
+                        </div>
+                        <p class="mb-1">{{ rec.recommended_location.description|truncatechars:50 }}</p>
+                        <small>{{ rec.recommended_location.get_location_type_display }}</small>
+                    </a>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-muted">No recommendations available</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                <h5><i class="fas fa-map"></i> Campus Map</h5>
+                <div>
+                    <button class="btn btn-sm btn-light me-2" onclick="locateMe()">
+                        <i class="fas fa-location-arrow"></i> Locate Me
+                    </button>
+                    <div class="btn-group btn-group-sm">
+                        <button class="btn btn-light" onclick="zoomIn()"><i class="fas fa-plus"></i></button>
+                        <button class="btn btn-light" onclick="zoomOut()"><i class="fas fa-minus"></i></button>
+                    </div>
+                </div>
+            </div>
+            <div class="card-body p-0" style="height: 600px;">
+                <div id="map" style="height: 100%; width: 100%;">
+                    {{ map_html|safe }}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="directionsModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Directions</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div id="routeDetails"></div>
+                <div id="routeMap" style="height: 400px; width: 100%;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Search functionality
+    document.getElementById('searchInput').addEventListener('input', function() {
+        const query = this.value.trim();
+        if (query.length >= 2) {
+            fetch(`{% url 'search_locations' %}?q=${query}`)
+                .then(response => response.json())
+                .then(data => {
+                    const resultsContainer = document.getElementById('searchResults');
+                    resultsContainer.innerHTML = '';
+                    
+                    if (data.locations.length > 0) {
+                        data.locations.forEach(location => {
+                            const item = document.createElement('a');
+                            item.href = '#';
+                            item.className = 'list-group-item list-group-item-action';
+                            item.innerHTML = `
+                                <h6>${location.name}</h6>
+                                <small class="text-muted">${location.location_type}</small>
+                                <p class="mb-1">${location.description || ''}</p>
+                            `;
+                            item.addEventListener('click', (e) => {
+                                e.preventDefault();
+                                showLocation(location.location_id);
+                            });
+                            resultsContainer.appendChild(item);
+                        });
+                    } else {
+                        resultsContainer.innerHTML = '<div class="list-group-item">No results found</div>';
+                    }
+                });
+        }
+    });
+    
+    // Prevent form submission
+    document.getElementById('searchForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+    });
+    
+    // Show location on map
+    function showLocation(locationId) {
+        // In a real implementation, you would highlight the location on the map
+        // For now, we'll just show an alert
+        alert(`Showing details for location ID: ${locationId}`);
+        
+        // You would typically make an AJAX call to get the location details
+        // and then center the map on that location
+    }
+    
+    // Navigation functions
+    function locateMe() {
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(
+                position => {
+                    const { latitude, longitude, accuracy } = position.coords;
+                    
+                    // Send to server
+                    fetch("{% url 'update_location' %}", {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRFToken': '{{ csrf_token }}'
+                        },
+                        body: JSON.stringify({
+                            latitude: latitude,
+                            longitude: longitude,
+                            accuracy: accuracy
+                        })
+                    }).then(response => response.json())
+                      .then(data => {
+                          if (data.success) {
+                              // Reload the page to show updated location
+                              window.location.reload();
+                          }
+                      });
+                },
+                error => {
+                    console.error("Geolocation error:", error);
+                    alert("Could not get your location. Please ensure location services are enabled.");
+                },
+                { enableHighAccuracy: true }
+            );
+        } else {
+            alert("Geolocation is not supported by your browser.");
+        }
+    }
+    
+    function zoomIn() {
+        // Implement map zoom in
+        alert("Zooming in - would be implemented with map API");
+    }
+    
+    function zoomOut() {
+        // Implement map zoom out
+        alert("Zooming out - would be implemented with map API");
+    }
+    
+    // Get directions between two points
+    function getDirections(fromId, toId) {
+        fetch("{% url 'get_directions' %}", {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': '{{ csrf_token }}'
+            },
+            body: JSON.stringify({
+                from: fromId,
+                to: toId
+            })
+        }).then(response => response.json())
+          .then(data => {
+              if (data.success) {
+                  const modal = new bootstrap.Modal(document.getElementById('directionsModal'));
+                  const routeDetails = document.getElementById('routeDetails');
+                  
+                  // Show route details
+                  routeDetails.innerHTML = `
+                      <h6>From: ${data.route.source.name}</h6>
+                      <h6>To: ${data.route.destination.name}</h6>
+                      <p>Distance: ${data.route.distance.toFixed(0)} meters</p>
+                      <p>Estimated time: ${data.route.estimated_time} minutes</p>
+                      <hr>
+                      <h6>Steps:</h6>
+                      <ol>
+                          ${data.route.steps.map(step => `<li>${step.instruction} (${step.distance.toFixed(0)}m, ${Math.round(step.duration/60)} min)</li>`).join('')}
+                      </ol>
+                  `;
+                  
+                  // Show route on map (would be implemented with map API)
+                  modal.show();
+              } else {
+                  alert("Error getting directions: " + (data.error || 'Unknown error'));
+              }
+          });
+    }
+</script>
+{% endblock %}
