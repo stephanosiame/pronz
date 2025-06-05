@@ -22,6 +22,19 @@ from .models import *
 from .forms import *
 from .utils import send_sms, calculate_route
 
+# --- Constants for CoICT Campus Boundaries ---
+COICT_CENTER_LAT = -6.771204359255421
+COICT_CENTER_LON = 39.24001333969674
+# Offset in degrees. 0.002 degrees is approx 222 meters.
+# This creates a square boundary.
+COICT_BOUNDS_OFFSET = 0.002
+
+STRICT_BOUNDS = [
+    [COICT_CENTER_LAT - COICT_BOUNDS_OFFSET, COICT_CENTER_LON - COICT_BOUNDS_OFFSET],  # SW corner
+    [COICT_CENTER_LAT + COICT_BOUNDS_OFFSET, COICT_CENTER_LON + COICT_BOUNDS_OFFSET]   # NE corner
+]
+# --- End Constants ---
+
 def home(request):
     """Home page - redirect to dashboard if authenticated"""
     if request.user.is_authenticated:
@@ -92,7 +105,12 @@ def logout_view(request):
 def verify_token_view(request, user_id):
     """Verify SMS token"""
     user = get_object_or_404(CustomUser, id=user_id)
-    
+    #TODO: The token_created_at check here might be problematic if user object doesn't have it.
+    # This should be reviewed if password reset verify fails.
+    # if user.token_created_at and timezone.now() > user.token_created_at + timedelta(minutes=settings.PASSWORD_RESET_TIMEOUT_MINUTES):
+    #    messages.error(request, 'Reset code has expired. Please request a new one.')
+    #    return redirect('password_reset_request')
+
     if request.method == 'POST':
         form = TokenVerificationForm(request.POST)
         if form.is_valid():
@@ -124,20 +142,19 @@ def verify_token_view(request, user_id):
     
     return render(request, 'verify_token.html', {'form': form, 'user': user})
 
-def generate_restricted_campus_map(user_location=None, nearby_locations=None):
+def generate_restricted_campus_map(user_location=None, nearby_locations=None, defined_bounds=None):
     """Generate a restricted campus map using Folium for CoICT-UDSM with strict bounds"""
     
-    # Exact CoICT center coordinates
-    CENTER_LAT = -6.771204359255421
-    CENTER_LON = 39.24001333969674
-    
-    # Calculate bounds for 0.13 mile radius (approx. 209 meters)
-    RADIUS_MILES = 0.13
-    RADIUS_METERS = RADIUS_MILES * 1609.34  # Convert miles to meters
+    if defined_bounds is None:
+        # Fallback to global STRICT_BOUNDS if not provided, though it should always be.
+        defined_bounds = STRICT_BOUNDS
+
+    center_lat = (defined_bounds[0][0] + defined_bounds[1][0]) / 2
+    center_lon = (defined_bounds[0][1] + defined_bounds[1][1]) / 2
     
     # Create map centered on CoICT with full-screen settings
     campus_map = folium.Map(
-        location=[CENTER_LAT, CENTER_LON],
+        location=[center_lat, center_lon],
         zoom_start=16,
         min_zoom=15,
         max_zoom=20,
@@ -150,16 +167,31 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None):
     # Set map to occupy full container
     campus_map.get_root().width = "100%"
     campus_map.get_root().height = "100%"
+
+    # Explicitly add the primary OpenStreetMap tile layer for roads and general map view
+    # This ensures it's named in the LayerControl.
+    folium.TileLayer(
+        tiles='OpenStreetMap',
+        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        name='OpenStreetMap',
+        overlay=False,
+        control=True
+    ).add_to(campus_map)
+
+    # Example: Add an alternative base map layer like CartoDB Positron for a different look
+    # User can switch between these layers using the LayerControl
+    folium.TileLayer(
+        tiles='CartoDB positron',
+        attr='&copy; <a href="https://carto.com/attributions">CARTO</a>',
+        name='CartoDB Positron (Light)',
+        overlay=False, # Base layer
+        control=True,
+        show=False # Initially not active, user can switch to it
+    ).add_to(campus_map)
     
-    # Calculate bounds for strict restriction
-    bounds = [
-        [CENTER_LAT - 0.002, CENTER_LON - 0.002],  # SW corner
-        [CENTER_LAT + 0.002, CENTER_LON + 0.002]   # NE corner
-    ]
-    
-    # Add strict boundary rectangle
+    # Add strict boundary rectangle using the passed defined_bounds
     folium.Rectangle(
-        bounds=bounds,
+        bounds=defined_bounds,
         color='#1e3a8a',
         weight=2,
         fill=True,
@@ -170,7 +202,7 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None):
     
     # Add center marker
     folium.Marker(
-        location=[CENTER_LAT, CENTER_LON],
+        location=[center_lat, center_lon],
         popup='<b>CoICT Center</b><br>University of Dar es Salaam',
         icon=folium.Icon(color='blue', icon='university', prefix='fa')
     ).add_to(campus_map)
@@ -180,9 +212,9 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None):
         user_lat = user_location.y
         user_lon = user_location.x
         
-        # Check if within bounds
-        if (bounds[0][0] <= user_lat <= bounds[1][0] and 
-            bounds[0][1] <= user_lon <= bounds[1][1]):
+        # Check if within defined_bounds
+        if (defined_bounds[0][0] <= user_lat <= defined_bounds[1][0] and
+            defined_bounds[0][1] <= user_lon <= defined_bounds[1][1]):
             
             folium.Marker(
                 location=[user_lat, user_lon],
@@ -190,16 +222,17 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None):
                 icon=folium.Icon(color='red', icon='user', prefix='fa')
             ).add_to(campus_map)
     
-    # Add nearby locations only if within bounds
+    # Add nearby locations only if within defined_bounds
+    # Note: nearby_locations should already be pre-filtered by dashboard_view
     if nearby_locations:
-        for location in nearby_locations:
+        for location in nearby_locations: # These are already filtered
             if location.coordinates:
                 lat = location.coordinates.y
                 lon = location.coordinates.x
-                
-                # Check if within bounds
-                if (bounds[0][0] <= lat <= bounds[1][0] and 
-                    bounds[0][1] <= lon <= bounds[1][1]):
+                # This check is somewhat redundant if pre-filtering is done correctly,
+                # but kept as a safeguard for map marker placement.
+                if (defined_bounds[0][0] <= lat <= defined_bounds[1][0] and
+                    defined_bounds[0][1] <= lon <= defined_bounds[1][1]):
                     
                     folium.Marker(
                         location=[lat, lon],
@@ -209,10 +242,10 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None):
     
     # Add JavaScript to enforce strict bounds and full-screen behavior
     bounds_js = f"""
-    // Define strict bounds
+    // Define strict bounds using defined_bounds
     var strictBounds = L.latLngBounds(
-        L.latLng({bounds[0][0]}, {bounds[0][1]}),
-        L.latLng({bounds[1][0]}, {bounds[1][1]})
+        L.latLng({defined_bounds[0][0]}, {defined_bounds[0][1]}),
+        L.latLng({defined_bounds[1][0]}, {defined_bounds[1][1]})
     );
     
     // Apply bounds immediately
@@ -269,6 +302,9 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None):
     </style>
     """
     campus_map.get_root().html.add_child(folium.Element(map_css))
+
+    # Add Layer Control to the map
+    folium.LayerControl().add_to(campus_map)
     
     return campus_map._repr_html_()
 
@@ -277,9 +313,13 @@ def dashboard_view(request):
     """Main dashboard with restricted campus map and recommendations"""
     # Get nearby locations for recommendations
     user_location = None
-    nearby_locations = []
+    # nearby_locations will be a list of Location model instances
+    nearby_locations_list = []
     recommendations = []
     
+    # Use the global STRICT_BOUNDS for consistency
+    current_strict_bounds = STRICT_BOUNDS
+
     # Get user's last known location or use default college center
     try:
         user_location_obj = UserLocation.objects.filter(user=request.user).latest('timestamp')
@@ -292,37 +332,52 @@ def dashboard_view(request):
         user_location = Point(39.23999216661627, -6.771396137358294, srid=4326)  # Point(longitude, latitude)
     
     if user_location:
-        # Find nearby locations within campus area (5km radius to include full campus)
-        nearby_locations_queryset = Location.objects.annotate(
+        # Find all locations within a broader radius first (e.g., 5km)
+        potential_nearby_locations = Location.objects.annotate(
             distance=DistanceFunction('coordinates', user_location)
         ).filter(
-            coordinates__distance_lte=(user_location, Distance(km=5))
+            coordinates__distance_lte=(user_location, Distance(km=5)) # Broad geographical filter
         ).order_by('distance')
         
-        # Generate smart recommendations based on user preferences and time
-        current_hour = timezone.now().hour
-        recommendations = get_smart_recommendations(request.user, nearby_locations_queryset, current_hour)
+        # Rigorously filter locations to be within the STRICT_BOUNDS
+        # And ensure they have coordinates
+        filtered_nearby_locations = []
+        for loc in potential_nearby_locations:
+            if loc.coordinates:
+                lat, lon = loc.coordinates.y, loc.coordinates.x
+                if (current_strict_bounds[0][0] <= lat <= current_strict_bounds[1][0] and
+                    current_strict_bounds[0][1] <= lon <= current_strict_bounds[1][1]):
+                    filtered_nearby_locations.append(loc)
         
-        # Get locations for display (limit to prevent overcrowding)
-        nearby_locations = nearby_locations_queryset[:50]  # Show more locations since we're restricting to campus
+        # Now, nearby_locations_list contains only locations strictly within bounds
+        # Apply slicing after filtering
+        nearby_locations_list = filtered_nearby_locations[:50]
+
+        # Generate smart recommendations based on user preferences and time,
+        # using only the strictly filtered nearby locations for context if needed
+        current_hour = timezone.now().hour
+        # Pass the QuerySet potential_nearby_locations or the filtered list
+        # depending on how get_smart_recommendations uses it.
+        # For now, assuming it can handle a list of model instances.
+        recommendations = get_smart_recommendations(request.user, nearby_locations_list, current_hour)
     
     # Get recent searches
     recent_searches = UserSearch.objects.filter(user=request.user).order_by('-timestamp')[:5]
     
-    # Generate restricted campus map HTML
-    map_html = generate_restricted_campus_map(user_location, nearby_locations)
+    # Generate restricted campus map HTML, passing the filtered list and bounds
+    map_html = generate_restricted_campus_map(user_location, nearby_locations_list, defined_bounds=current_strict_bounds)
     
     # Get user preferences for theme, zoom, etc.
     user_preferences = get_user_preferences(request.user)
     
     context = {
-        'nearby_locations': nearby_locations,
+        'nearby_locations': nearby_locations_list, # Use the filtered and sliced list
         'recommendations': recommendations,
         'recent_searches': recent_searches,
         'map_html': map_html,
         'user_location': user_location,
         'user_preferences': user_preferences,
-        'total_locations': nearby_locations.count() if nearby_locations else 0,
+        'total_locations': len(nearby_locations_list), # Count of the filtered list
     }
     
     return render(request, 'dashboard.html', context)
@@ -671,6 +726,25 @@ def update_preferences(request):
     
     return JsonResponse({'success': False})
 
+@login_required
+def get_location_details_json(request, location_id):
+    """Return location details (name, lat, lon) as JSON."""
+    try:
+        location = get_object_or_404(Location, location_id=location_id)
+        if location.coordinates:
+            return JsonResponse({
+                'success': True,
+                'name': location.name,
+                'latitude': location.coordinates.y,
+                'longitude': location.coordinates.x
+            })
+        else:
+            return JsonResponse({'success': False, 'error': 'Location has no coordinates.'})
+    except Location.DoesNotExist:
+        return JsonResponse({'success': False, 'error': 'Location not found.'})
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
 # Helper functions
 def get_smart_recommendations(user, nearby_locations, current_hour):
     """Generate smart recommendations based on time and user behavior"""
@@ -695,13 +769,29 @@ def get_smart_recommendations(user, nearby_locations, current_hour):
                 recommendations.append(recommendation)
             except Recommendation.DoesNotExist:
                 # Create a basic recommendation if none exists
+                # Ensure 'recommended_location' matches the template access pattern
                 recommendations.append({
-                    'location': location,
+                    'recommended_location': location, # Changed 'location' to 'recommended_location'
                     'reason': f'Popular {location_type} nearby',
-                    'rating': 4.0
+                    'rating': 4.0,
+                    'media_url': None # Add media_url for consistency
                 })
     
-    return recommendations[:6]
+    # Ensure all items are dictionaries for uniform access in template if mixing Recommendation objects and dicts
+    processed_recommendations = []
+    for rec in recommendations[:6]:
+        if isinstance(rec, Recommendation):
+            processed_recommendations.append({
+                'recommended_location': rec.recommended_location,
+                'reason': rec.reason,
+                'rating': rec.rating,
+                'media_url': rec.media_url,
+                # Add other fields from Recommendation model if needed in template
+            })
+        else:
+            processed_recommendations.append(rec) # Already a dict
+
+    return processed_recommendations
 
 def get_user_preferences(user):
     """Get user preferences with defaults"""
