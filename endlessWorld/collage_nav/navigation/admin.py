@@ -24,25 +24,50 @@ admin.site.register(RouteRequest)
 admin.site.register(GeofenceEntry)
 admin.site.register(UserLocation)  # Added missing model
 
+from django.contrib.gis import admin as gis_admin # Use alias to avoid conflict if regular 'admin' is used a lot
+
+# --- Constants for CoICT Campus Map Default View in Admin ---
+# Ideally, these would be imported from a central settings/constants file
+COICT_CENTER_LAT_ADMIN = -6.771204359255421
+COICT_CENTER_LON_ADMIN = 39.24001333969674
+# --- End Constants ---
+
 # Optional: Enhanced admin classes for better management
 # Uncomment these if you want more detailed admin interfaces
 
-# @admin.register(CustomUser)
+# @admin.register(CustomUser) # Keep using admin.register for non-GIS models
 # class CustomUserAdmin(admin.ModelAdmin):
 #     list_display = ('username', 'email', 'phone_number', 'role', 'is_verified', 'date_joined')
 #     list_filter = ('role', 'is_verified', 'date_joined')
 #     search_fields = ('username', 'email', 'phone_number', 'first_name', 'last_name')
 #     readonly_fields = ('date_joined', 'last_login')
 
-# @admin.register(Location)
-# class LocationAdmin(admin.ModelAdmin):
-#     list_display = ('name', 'location_type', 'floor_level', 'is_accessible', 'created_at')
-#     list_filter = ('location_type', 'is_accessible', 'floor_level')
-#     search_fields = ('name', 'description')
-#     readonly_fields = ('location_id', 'created_at', 'updated_at')
+# The @gis_admin.register(Location) decorator handles unregistering if Location was previously registered.
+@gis_admin.register(Location)
+class LocationAdmin(gis_admin.OSMGeoAdmin): # Inherit from OSMGeoAdmin
+    list_display = ('name', 'location_type', 'address', 'floor_level', 'is_accessible', 'updated_at')
+    search_fields = ('name', 'address', 'description', 'location_type')
+    list_filter = ('location_type', 'is_accessible', 'floor_level')
 
-# @admin.register(SMSAlert)
-# class SMSAlertAdmin(admin.ModelAdmin):
+    # Define fields to ensure all are editable and in desired order
+    # OSMGeoAdmin handles 'coordinates' with a map widget.
+    # 'location_id', 'created_at', 'updated_at' are often read-only or auto-managed.
+    fields = (
+        'name', 'description', 'address', 'location_type',
+        'coordinates', # This will use the OSMGeoAdmin map widget
+        'floor_level', 'is_accessible', 'capacity',
+        'operating_hours', 'contact_info', 'image',
+        'location_id', 'created_at', 'updated_at' # Display as read-only
+    )
+    readonly_fields = ('location_id', 'created_at', 'updated_at') # Make these read-only in the form
+
+    # Default map settings for OSMGeoAdmin
+    default_lat = COICT_CENTER_LAT_ADMIN
+    default_lon = COICT_CENTER_LON_ADMIN
+    default_zoom = 16 # A bit more zoomed in for better detail initially
+
+# @gis_admin.register(SMSAlert) # Use gis_admin if SMSAlert had GeoDjango fields, otherwise admin.register
+# class SMSAlertAdmin(admin.ModelAdmin): # If not a GeoDjango model, use admin.ModelAdmin
 #     list_display = ('user', 'alert_type', 'is_sent', 'sent_at', 'created_at')
 #     list_filter = ('alert_type', 'is_sent', 'created_at')
 #     search_fields = ('user__username', 'user__phone_number', 'message')

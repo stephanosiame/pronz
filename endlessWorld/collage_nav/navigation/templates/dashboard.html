@@ -52,15 +52,21 @@
                 {% if recommendations %}
                 <div class="list-group">
                     {% for rec in recommendations %}
-                    <a href="#" class="list-group-item list-group-item-action" 
-                       onclick="showLocation('{{ rec.recommended_location.location_id }}')">
+                    <div class="list-group-item list-group-item-action">
                         <div class="d-flex w-100 justify-content-between">
                             <h6 class="mb-1">{{ rec.recommended_location.name }}</h6>
                             <small>{{ rec.reason }}</small>
                         </div>
                         <p class="mb-1">{{ rec.recommended_location.description|truncatechars:50 }}</p>
                         <small>{{ rec.recommended_location.get_location_type_display }}</small>
-                    </a>
+                        {% if rec.media_url %}
+                        <div class="mt-2">
+                            <a href="#" onclick="showRecommendationOnMap('{{ rec.recommended_location.location_id }}', '{{ rec.media_url }}')">
+                                <img src="{{ rec.media_url }}" alt="{{ rec.recommended_location.name }} media" class="img-fluid rounded" style="max-height: 150px;">
+                            </a>
+                        </div>
+                        {% endif %}
+                    </div>
                     {% endfor %}
                 </div>
                 {% else %}
@@ -154,12 +160,64 @@
     
     // Show location on map
     function showLocation(locationId) {
-        // In a real implementation, you would highlight the location on the map
-        // For now, we'll just show an alert
-        alert(`Showing details for location ID: ${locationId}`);
-        
-        // You would typically make an AJAX call to get the location details
-        // and then center the map on that location
+        console.log("Attempting to show searched location on map for Location ID:", locationId);
+
+        // Dynamically find the map object
+        let mapInstance = window.map_map; // Default assumption
+        if (!mapInstance) {
+            for (const key in window) {
+                if (key.startsWith('map_') && window[key] && typeof window[key].panTo === 'function') {
+                    mapInstance = window[key];
+                    console.log("Dynamically found map instance:", key);
+                    break;
+                }
+            }
+        }
+
+        if (!mapInstance) {
+            console.error("Folium map instance (e.g., window.map_map or window.map_<map_id>) not found. Cannot interact with map.");
+            alert("Error: Map object not found. Cannot display location on map.");
+            return;
+        }
+
+        // Fetch location coordinates.
+        // The URL is constructed based on the urls.py pattern: path('api/location-details/<uuid:location_id>/', ...)
+        fetch(`/api/location-details/${locationId}/`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.latitude && data.longitude) {
+                    const lat = data.latitude;
+                    const lon = data.longitude;
+
+                    console.log(`Fetched coordinates for ${data.name}: Lat ${lat}, Lon ${lon}`);
+
+                    // Pan and zoom the map
+                    mapInstance.panTo([lat, lon]);
+                    mapInstance.setZoom(18); // Zoom in to a close level
+
+                    // Manage search result marker
+                    if (window.searchResultMarker) {
+                        mapInstance.removeLayer(window.searchResultMarker);
+                    }
+
+                    // Using a default Leaflet marker, customize as needed
+                    window.searchResultMarker = L.marker([lat, lon]).addTo(mapInstance)
+                        .bindPopup(`<b>${data.name}</b><br>Searched Location`)
+                        .openPopup();
+
+                    console.log("Map panned and zoomed for searched location. Marker added.");
+                    // Scroll to the map if it's not fully visible
+                    document.getElementById('map').scrollIntoView({ behavior: 'smooth' });
+
+                } else {
+                    console.error("Failed to fetch location details for searched location or missing coordinates:", data.error);
+                    alert("Could not fetch location details for search: " + (data.error || "Unknown error"));
+                }
+            })
+            .catch(error => {
+                console.error("Error fetching location details for searched location:", error);
+                alert("Error fetching location details for search. Please check console.");
+            });
     }
     
     // Navigation functions
@@ -247,6 +305,74 @@
                   alert("Error getting directions: " + (data.error || 'Unknown error'));
               }
           });
+    }
+
+    // Placeholder function for showing recommendation on map
+    function showRecommendationOnMap(locationId, mediaUrl) {
+        console.log("Attempting to show recommendation on map for Location ID:", locationId, "Media URL:", mediaUrl);
+
+        // Dynamically find the map object if its name is not fixed as map_map
+        let mapInstance = window.map_map; // Default assumption
+        if (!mapInstance) {
+            for (const key in window) {
+                if (key.startsWith('map_') && window[key] && typeof window[key].panTo === 'function') {
+                    mapInstance = window[key];
+                    console.log("Dynamically found map instance:", key);
+                    break;
+                }
+            }
+        }
+
+        if (!mapInstance) {
+            console.error("Folium map instance (e.g., window.map_map or window.map_<map_id>) not found. Cannot interact with map.");
+            alert("Error: Map object not found. Cannot display recommendation on map.");
+            return;
+        }
+
+        // Fetch location coordinates
+        fetch(`/api/location-details/${locationId}/`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.latitude && data.longitude) {
+                    const lat = data.latitude;
+                    const lon = data.longitude;
+
+                    console.log(`Fetched coordinates for ${data.name}: Lat ${lat}, Lon ${lon}`);
+
+                    // Pan and zoom the map
+                    mapInstance.panTo([lat, lon]);
+                    mapInstance.setZoom(18); // Zoom in to a close level
+
+                    // Optional: Add a temporary marker (Leaflet syntax, as Folium is Leaflet-based)
+                    // Remove previous recommendation markers if any
+                    if (window.recommendationMarker) {
+                        mapInstance.removeLayer(window.recommendationMarker);
+                    }
+
+                    window.recommendationMarker = L.marker([lat, lon], {
+                        icon: L.icon({ // Example of a custom icon
+                            iconUrl: '{% static "img/custom_marker_favicon.png" %}', // Replace with your marker icon if you have one
+                            iconSize: [32, 32],
+                            iconAnchor: [16, 32],
+                            popupAnchor: [0, -32]
+                        })
+                    }).addTo(mapInstance)
+                        .bindPopup(`<b>${data.name}</b><br><img src="${mediaUrl}" alt="${data.name}" style="width:100px;height:auto;">`)
+                        .openPopup();
+
+                    console.log("Map panned and zoomed. Marker added.");
+                    // Scroll to the map if it's not fully visible
+                    document.getElementById('map').scrollIntoView({ behavior: 'smooth' });
+
+                } else {
+                    console.error("Failed to fetch location details or missing coordinates:", data.error);
+                    alert("Could not fetch location details: " + (data.error || "Unknown error"));
+                }
+            })
+            .catch(error => {
+                console.error("Error fetching location details:", error);
+                alert("Error fetching location details. Please check console.");
+            });
     }
 </script>
 {% endblock %}

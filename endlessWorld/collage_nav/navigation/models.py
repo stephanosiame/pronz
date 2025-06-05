@@ -180,6 +180,7 @@ class Recommendation(models.Model):
     reason = models.CharField(max_length=200)
     score = models.FloatField(default=0.0)
     rating = models.FloatField(default=4.0)  # Added rating field
+    media_url = models.URLField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:

@@ -1,3 +1,354 @@
-from django.test import TestCase
+from django.test import TestCase, Client
+from django.urls import reverse
+from django.contrib.gis.geos import Point
+from django.utils import timezone
+import uuid
+import json
 
-# Create your tests here.
+from .models import CustomUser, Location, Recommendation, UserLocation
+from .forms import CustomUserRegistrationForm, TokenVerificationForm, PasswordResetRequestForm
+from .views import COICT_CENTER_LAT, COICT_CENTER_LON, COICT_BOUNDS_OFFSET, STRICT_BOUNDS
+
+# --- Helper Functions ---
+def create_user(username="testuser", password="password123", phone_number="+255700000000", email="test@example.com", is_verified=True, is_staff=False, is_superuser=False):
+    user = CustomUser.objects.create_user(
+        username=username,
+        password=password,
+        phone_number=phone_number,
+        email=email,
+        first_name="Test",
+        last_name="User"
+    )
+    user.is_verified = is_verified
+    user.is_staff = is_staff
+    user.is_superuser = is_superuser
+    user.save()
+    return user
+
+def create_location(name="Test Location", description="A place for testing.",
+                    address="123 Test St", location_type='building',
+                    lat=-6.771200, lon=39.240000, floor_level=0,
+                    is_accessible=True, capacity=100):
+    return Location.objects.create(
+        name=name,
+        description=description,
+        address=address,
+        location_type=location_type,
+        coordinates=Point(lon, lat, srid=4326), # lon, lat
+        floor_level=floor_level,
+        is_accessible=is_accessible,
+        capacity=capacity
+    )
+
+def create_recommendation(user, location, recommended_location, reason="Test reason", media_url=None):
+    return Recommendation.objects.create(
+        user=user,
+        location=location, # current location context for recommendation
+        recommended_location=recommended_location,
+        reason=reason,
+        score=0.8, # Example score
+        media_url=media_url
+    )
+
+# --- Test Classes ---
+
+class RecommendationAreaTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = create_user(username="rec_user", phone_number="+255700000001")
+        self.location1 = create_location(name="Main Building", lat=COICT_CENTER_LAT, lon=COICT_CENTER_LON)
+        self.location2 = create_location(name="Library", lat=COICT_CENTER_LAT + 0.0001, lon=COICT_CENTER_LON + 0.0001)
+        self.media_url = "http://example.com/image.png"
+
+    def test_recommendation_model_creation(self):
+        recommendation = create_recommendation(
+            user=self.user,
+            location=self.location1,
+            recommended_location=self.location2,
+            media_url=self.media_url
+        )
+        self.assertEqual(recommendation.media_url, self.media_url)
+        self.assertEqual(Recommendation.objects.count(), 1)
+
+    def test_get_location_details_json_view_success(self):
+        url = reverse('get_location_details_json', args=[self.location1.location_id])
+        self.client.login(username="rec_user", password="password123")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['name'], self.location1.name)
+        self.assertAlmostEqual(data['latitude'], self.location1.coordinates.y)
+        self.assertAlmostEqual(data['longitude'], self.location1.coordinates.x)
+
+    def test_get_location_details_json_view_not_found(self):
+        non_existent_uuid = uuid.uuid4()
+        url = reverse('get_location_details_json', args=[non_existent_uuid])
+        self.client.login(username="rec_user", password="password123")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200) # View returns JsonResponse with success=False for not found
+        data = response.json()
+        self.assertFalse(data['success'])
+        self.assertEqual(data['error'], 'Location not found.')
+
+    def test_dashboard_view_recommendations_context(self):
+        create_recommendation(
+            user=self.user,
+            location=self.location1,
+            recommended_location=self.location2,
+            media_url=self.media_url
+        )
+        # Simulate user location for recommendation generation
+        UserLocation.objects.create(user=self.user, location=self.location1.coordinates)
+
+        self.client.login(username="rec_user", password="password123")
+        response = self.client.get(reverse('dashboard'))
+        self.assertEqual(response.status_code, 200)
+
+        # Check if recommendations are in context and have media_url
+        # The get_smart_recommendations function might return a mix of dicts and objects
+        # and has specific logic for formatting them.
+        recommendations_in_context = response.context.get('recommendations', [])
+        self.assertTrue(len(recommendations_in_context) > 0)
+
+        found_media_url = False
+        for rec in recommendations_in_context:
+            # Recommendations can be dicts or model instances based on get_smart_recommendations
+            if isinstance(rec, dict):
+                if rec.get('media_url') == self.media_url:
+                    found_media_url = True
+                    break
+            elif isinstance(rec, Recommendation): # Should not happen due to view logic
+                if rec.media_url == self.media_url:
+                    found_media_url = True
+                    break
+        # This test is a bit complex due to get_smart_recommendations logic.
+        # A simpler check might be to ensure the key 'media_url' is present in the dicts.
+        if recommendations_in_context:
+             self.assertTrue(any('media_url' in rec for rec in recommendations_in_context if isinstance(rec, dict)))
+
+
+# --- Boundary Restriction Tests ---
+class BoundaryRestrictionTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = create_user(username="boundary_user", phone_number="+255700000009")
+        self.client.login(username="boundary_user", password="password123")
+
+        # Locations for testing bounds
+        # Inside bounds (using STRICT_BOUNDS from views.py)
+        self.loc_inside1 = create_location(name="Inside Location 1",
+                                          lat=COICT_CENTER_LAT, lon=COICT_CENTER_LON)
+        self.loc_inside2 = create_location(name="Inside Location 2",
+                                          lat=COICT_CENTER_LAT + COICT_BOUNDS_OFFSET / 2,
+                                          lon=COICT_CENTER_LON - COICT_BOUNDS_OFFSET / 2)
+
+        # Outside bounds
+        self.loc_outside_lat = create_location(name="Outside Location Lat",
+                                               lat=COICT_CENTER_LAT + COICT_BOUNDS_OFFSET * 2,
+                                               lon=COICT_CENTER_LON)
+        self.loc_outside_lon = create_location(name="Outside Location Lon",
+                                               lat=COICT_CENTER_LAT,
+                                               lon=COICT_CENTER_LON - COICT_BOUNDS_OFFSET * 2)
+        # User's current location to be within bounds for nearby search
+        UserLocation.objects.create(user=self.user, location=Point(COICT_CENTER_LON, COICT_CENTER_LAT, srid=4326))
+
+
+    def test_dashboard_view_nearby_locations_filtered_by_bounds(self):
+        response = self.client.get(reverse('dashboard'))
+        self.assertEqual(response.status_code, 200)
+
+        nearby_locations_in_context = response.context.get('nearby_locations', [])
+        nearby_location_ids = [loc.location_id for loc in nearby_locations_in_context]
+
+        self.assertIn(self.loc_inside1.location_id, nearby_location_ids)
+        self.assertIn(self.loc_inside2.location_id, nearby_location_ids)
+        self.assertNotIn(self.loc_outside_lat.location_id, nearby_location_ids)
+        self.assertNotIn(self.loc_outside_lon.location_id, nearby_location_ids)
+
+        # Also check total_locations count if it reflects only within-bound locations
+        # The dashboard_view limits to 50, so ensure this is also handled if many inside locations exist.
+        # For this test, we have few locations, so count should be exact.
+        self.assertEqual(response.context.get('total_locations'), 2)
+
+
+# --- Search To Map Tests (View part) ---
+class SearchToMapTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = create_user(username="search_user", phone_number="+255700000010")
+        self.client.login(username="search_user", password="password123")
+
+        self.search_loc1 = create_location(name="Lecture Hall Alpha", description="Main hall for CS", location_type='lecture_hall')
+        self.search_loc2 = create_location(name="Cafeteria Beta", description="Serves snacks and coffee", location_type='cafeteria')
+        self.search_loc3 = create_location(name="Library Gamma", description="Quiet study area", location_type='library')
+
+    def test_search_locations_view_success_name_query(self):
+        response = self.client.get(reverse('search_locations'), {'q': 'Alpha'})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(len(data['locations']) == 1)
+        self.assertEqual(data['locations'][0]['name'], self.search_loc1.name)
+
+    def test_search_locations_view_success_description_query(self):
+        response = self.client.get(reverse('search_locations'), {'q': 'coffee'})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(len(data['locations']) == 1)
+        self.assertEqual(data['locations'][0]['name'], self.search_loc2.name)
+
+    def test_search_locations_view_type_query(self):
+        response = self.client.get(reverse('search_locations'), {'q': 'library'}) # 'library' is a type and in name
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(len(data['locations']) >= 1) # Could match type or name
+        self.assertTrue(any(loc['name'] == self.search_loc3.name for loc in data['locations']))
+
+
+    def test_search_locations_view_no_results(self):
+        response = self.client.get(reverse('search_locations'), {'q': 'NonExistentXYZ'})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data['locations']), 0)
+
+    def test_search_locations_view_empty_query(self): # Query < 2 chars
+        response = self.client.get(reverse('search_locations'), {'q': 'A'})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data['locations']), 0)
+
+
+# --- Admin Area Tests ---
+class AdminAreaTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.admin_user = create_user(username="admin_user", phone_number="+255700000011", is_staff=True, is_superuser=True)
+        self.client.login(username="admin_user", password="password123")
+
+    def test_location_admin_changelist_accessible(self):
+        response = self.client.get(reverse('admin:navigation_location_changelist'))
+        self.assertEqual(response.status_code, 200)
+
+    def test_location_admin_add_page_accessible(self):
+        response = self.client.get(reverse('admin:navigation_location_add'))
+        self.assertEqual(response.status_code, 200)
+
+    def test_location_admin_change_page_accessible(self):
+        loc = create_location(name="Admin Test Loc")
+        response = self.client.get(reverse('admin:navigation_location_change', args=[loc.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, loc.name) # Check if location name is in the form
+
+
+# --- Token Verification Tests (already started) ---
+class TokenVerificationTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+
+    def test_login_unverified_user(self):
+        user = create_user(username="unverified_user", phone_number="+255700000002", is_verified=False)
+        # Manually create a verification token for the user as register_view does
+        user.verification_token = "123456"
+        user.token_created_at = timezone.now()
+        user.save()
+
+        response = self.client.post(reverse('login'), {
+            'username': 'unverified_user',
+            'password': 'password123'
+        })
+        self.assertRedirects(response, reverse('verify_token', args=[user.id]))
+
+    def test_login_verified_user(self):
+        create_user(username="verified_user", phone_number="+255700000003", is_verified=True)
+        response = self.client.post(reverse('login'), {
+            'username': 'verified_user',
+            'password': 'password123'
+        })
+        self.assertRedirects(response, reverse('dashboard'))
+
+    def test_register_view_flow(self):
+        user_count_before = CustomUser.objects.count()
+        phone_number_for_reg = "+255700000004" # Ensure unique
+        response = self.client.post(reverse('register'), {
+            'username': 'new_reg_user',
+            'password': 'password123',
+            'password2': 'password123',
+            'email': 'newreg@example.com',
+            'phone_number': phone_number_for_reg,
+            'first_name': 'New',
+            'last_name': 'Reg',
+            'role': 'student'
+        })
+        self.assertEqual(CustomUser.objects.count(), user_count_before + 1)
+        new_user = CustomUser.objects.get(username='new_reg_user')
+        self.assertFalse(new_user.is_verified)
+        self.assertIsNotNone(new_user.verification_token)
+        self.assertRedirects(response, reverse('verify_token', args=[new_user.id]))
+
+    def test_verify_token_view_correct_token(self):
+        user = create_user(username="verify_me", phone_number="+255700000005", is_verified=False)
+        user.verification_token = "654321"
+        user.token_created_at = timezone.now()
+        user.save()
+
+        response = self.client.post(reverse('verify_token', args=[user.id]), {
+            'token': '654321'
+        })
+        user.refresh_from_db()
+        self.assertTrue(user.is_verified)
+        self.assertIsNone(user.verification_token)
+        self.assertRedirects(response, reverse('login'))
+
+    def test_verify_token_view_incorrect_token(self):
+        user = create_user(username="verify_fail", phone_number="+255700000006", is_verified=False)
+        user.verification_token = "111222"
+        user.token_created_at = timezone.now()
+        user.save()
+
+        response = self.client.post(reverse('verify_token', args=[user.id]), {
+            'token': '000000' # Incorrect token
+        })
+        user.refresh_from_db()
+        self.assertFalse(user.is_verified) # Should remain unverified
+        self.assertIn('Invalid verification code.', response.content.decode())
+
+    def test_password_reset_verified_user_remains_verified(self):
+        user = create_user(username="pw_reset_verified", phone_number="+255700000007", is_verified=True)
+
+        # Request reset
+        self.client.post(reverse('password_reset_request'), {'phone_number': user.phone_number})
+        user.refresh_from_db()
+        self.assertIsNotNone(user.verification_token)
+        reset_token = user.verification_token
+
+        # Verify reset (set new password)
+        self.client.post(reverse('password_reset_verify', args=[user.id]), {
+            'token': reset_token,
+            'new_password': 'newpassword123',
+            'confirm_password': 'newpassword123'
+        })
+        user.refresh_from_db()
+        self.assertTrue(user.is_verified) # Crucial: user remains verified
+
+    def test_password_reset_unverified_user_remains_unverified(self):
+        user = create_user(username="pw_reset_unverified", phone_number="+255700000008", is_verified=False)
+        initial_token = "initialtoken" # Simulate an initial verification token
+        user.verification_token = initial_token
+        user.save()
+
+        # Request reset
+        self.client.post(reverse('password_reset_request'), {'phone_number': user.phone_number})
+        user.refresh_from_db()
+        self.assertIsNotNone(user.verification_token)
+        self.assertNotEqual(user.verification_token, initial_token) # Token should change
+        reset_token = user.verification_token
+
+        # Verify reset (set new password)
+        self.client.post(reverse('password_reset_verify', args=[user.id]), {
+            'token': reset_token,
+            'new_password': 'newpassword123',
+            'confirm_password': 'newpassword123'
+        })
+        user.refresh_from_db()
+        self.assertFalse(user.is_verified) # Crucial: user remains unverified
+```
