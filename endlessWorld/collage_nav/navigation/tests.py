@@ -7,7 +7,7 @@ import json
 
 from .models import CustomUser, Location, Recommendation, UserLocation
 from .forms import CustomUserRegistrationForm, TokenVerificationForm, PasswordResetRequestForm
-from .views import COICT_CENTER_LAT, COICT_CENTER_LON, COICT_BOUNDS_OFFSET, STRICT_BOUNDS
+from .views import COICT_CENTER_LAT, COICT_CENTER_LON, COICT_BOUNDS_OFFSET, STRICT_BOUNDS, get_smart_recommendations
 
 # --- Helper Functions ---
 def create_user(username="testuser", password="password123", phone_number="+255700000000", email="test@example.com", is_verified=True, is_staff=False, is_superuser=False):
@@ -126,6 +126,89 @@ class RecommendationAreaTests(TestCase):
         # A simpler check might be to ensure the key 'media_url' is present in the dicts.
         if recommendations_in_context:
              self.assertTrue(any('media_url' in rec for rec in recommendations_in_context if isinstance(rec, dict)))
+
+    def test_get_smart_recommendations_logic(self):
+        user_for_smart_rec = create_user(username='testuser_smart_rec', phone_number="+255700000012") # New user for this test
+
+        # Create Location objects
+        loc1_lib = create_location(name='Main Library', location_type='library', description='Quiet study place.')
+        loc2_lib = create_location(name='Science Library', location_type='library', description='Books and journals.')
+        loc3_lib = create_location(name='Old Library', location_type='library', description='Historical archives.') # Third library
+        loc4_cafe = create_location(name='Student Cafe', location_type='cafeteria', description='Coffee and snacks.')
+        # Simulate loc4_cafe having an image for media_url fallback test
+        # In a real scenario, this would involve uploading a file. For testing, we can mock the field's url attribute if needed,
+        # but getattr(loc_obj.image, 'url', None) will return None if image is not set, which is testable.
+        # For simplicity, we'll assume image.url is None if not explicitly set with a file.
+
+        loc5_office = create_location(name='Admin Office', location_type='office', description='Enquiries.') # Different type not in morning priorities
+
+        # Create an existing Recommendation for one of the locations
+        existing_rec_for_loc1 = Recommendation.objects.create(
+            user=user_for_smart_rec,
+            recommended_location=loc1_lib,
+            reason="A great place to study!",
+            score=0.9,
+            rating=4.8,
+            media_url="http://example.com/library.jpg"
+        )
+
+        nearby_locations_list = [loc1_lib, loc2_lib, loc3_lib, loc4_cafe, loc5_office]
+        current_morning_hour = 9 # Morning: expects 'library', 'cafeteria', 'lecture_hall'
+
+        recommendations = get_smart_recommendations(user_for_smart_rec, nearby_locations_list, current_morning_hour)
+
+        self.assertIsInstance(recommendations, list)
+        # Expected: 2 libraries (loc1_lib from existing, loc2_lib as default) + 1 cafeteria (loc4_cafe as default)
+        self.assertEqual(len(recommendations), 3,
+                         f"Expected 3 recommendations (2 libraries, 1 cafeteria), got {len(recommendations)}")
+
+        found_loc1_rec = False
+        found_loc2_rec = False
+        found_loc4_cafe_rec = False
+
+        for rec_dict in recommendations:
+            self.assertIsInstance(rec_dict, dict)
+            self.assertIn('recommended_location', rec_dict)
+            self.assertIsInstance(rec_dict['recommended_location'], Location)
+            self.assertIn('reason', rec_dict)
+            self.assertIn('rating', rec_dict)
+            self.assertIn('media_url', rec_dict)
+            self.assertIn('description', rec_dict)
+            self.assertIn('location_type_display', rec_dict)
+
+            if rec_dict['recommended_location'].location_id == loc1_lib.location_id:
+                found_loc1_rec = True
+                self.assertEqual(rec_dict['reason'], "A great place to study!")
+                self.assertEqual(rec_dict['rating'], 4.8)
+                self.assertEqual(rec_dict['media_url'], "http://example.com/library.jpg")
+
+            elif rec_dict['recommended_location'].location_id == loc2_lib.location_id:
+                found_loc2_rec = True
+                self.assertEqual(rec_dict['reason'], f'Popular {loc2_lib.get_location_type_display()} nearby')
+                self.assertEqual(rec_dict['rating'], 4.0)
+                # media_url will be None as loc2_lib.image is not set
+                self.assertIsNone(rec_dict['media_url'])
+
+            elif rec_dict['recommended_location'].location_id == loc4_cafe.location_id:
+                found_loc4_cafe_rec = True
+                self.assertEqual(rec_dict['reason'], f'Popular {loc4_cafe.get_location_type_display()} nearby')
+                self.assertEqual(rec_dict['rating'], 4.0)
+                self.assertIsNone(rec_dict['media_url']) # Assuming loc4_cafe.image is not set
+
+        self.assertTrue(found_loc1_rec, "Recommendation for Main Library (from existing Rec obj) not found or incorrect.")
+        self.assertTrue(found_loc2_rec, "Default recommendation for Science Library not found or incorrect.")
+        self.assertTrue(found_loc4_cafe_rec, "Default recommendation for Student Cafe not found or incorrect.")
+
+        library_recs_count = sum(1 for r in recommendations if r['recommended_location'].location_type == 'library')
+        self.assertEqual(library_recs_count, 2, "Should recommend at most 2 libraries based on priority.")
+
+        cafeteria_recs_count = sum(1 for r in recommendations if r['recommended_location'].location_type == 'cafeteria')
+        self.assertEqual(cafeteria_recs_count, 1, "Should recommend 1 cafeteria.")
+
+        # Ensure loc3_lib (third library) and loc5_office were not recommended
+        recommended_location_ids = [r['recommended_location'].location_id for r in recommendations]
+        self.assertNotIn(loc3_lib.location_id, recommended_location_ids, "Third library should not be recommended due to limit of 2.")
+        self.assertNotIn(loc5_office.location_id, recommended_location_ids, "Office location should not be recommended in the morning.")
 
 
 # --- Boundary Restriction Tests ---
