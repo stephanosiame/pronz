@@ -761,37 +761,47 @@ def get_smart_recommendations(user, nearby_locations, current_hour):
         priority_types = ['dormitory', 'security', 'parking']
     
     # Get recommendations based on priority types
-    for location_type in priority_types:
-        matching_locations = nearby_locations.filter(location_type=location_type)[:2]
-        for location in matching_locations:
-            try:
-                recommendation = Recommendation.objects.get(location=location)
-                recommendations.append(recommendation)
-            except Recommendation.DoesNotExist:
-                # Create a basic recommendation if none exists
-                # Ensure 'recommended_location' matches the template access pattern
-                recommendations.append({
-                    'recommended_location': location, # Changed 'location' to 'recommended_location'
-                    'reason': f'Popular {location_type} nearby',
-                    'rating': 4.0,
-                    'media_url': None # Add media_url for consistency
-                })
-    
-    # Ensure all items are dictionaries for uniform access in template if mixing Recommendation objects and dicts
-    processed_recommendations = []
-    for rec in recommendations[:6]:
-        if isinstance(rec, Recommendation):
-            processed_recommendations.append({
-                'recommended_location': rec.recommended_location,
-                'reason': rec.reason,
-                'rating': rec.rating,
-                'media_url': rec.media_url,
-                # Add other fields from Recommendation model if needed in template
-            })
-        else:
-            processed_recommendations.append(rec) # Already a dict
+    # nearby_locations is a list of Location model instances.
+    raw_recommendations = [] # Temporary list to hold found/created recommendations
 
-    return processed_recommendations
+    for location_type_filter in priority_types:
+        # Filter the list of Location objects using list comprehension
+        matching_location_objects = [
+            loc for loc in nearby_locations # nearby_locations is already the filtered list from dashboard_view
+            if loc.location_type == location_type_filter
+        ][:2] # Get the first 2 matches
+
+        for loc_obj in matching_location_objects:
+            existing_recommendation = Recommendation.objects.filter(recommended_location=loc_obj).order_by('-created_at').first()
+
+            if existing_recommendation:
+                # Use the existing Recommendation object's data
+                raw_recommendations.append({
+                    'recommended_location': loc_obj,
+                    'reason': existing_recommendation.reason,
+                    'rating': existing_recommendation.rating,
+                    'media_url': existing_recommendation.media_url,
+                    'description': loc_obj.description, # Add description from location object
+                    'location_type_display': loc_obj.get_location_type_display() # Add display name for type
+                })
+            else:
+                # Create a default dictionary if no specific Recommendation entry exists
+                # Attempt to get media_url from the location's image field if available
+                media_url_fallback = None
+                if loc_obj.image and hasattr(loc_obj.image, 'url'):
+                    media_url_fallback = loc_obj.image.url
+
+                raw_recommendations.append({
+                    'recommended_location': loc_obj,
+                    'reason': f'Popular {loc_obj.get_location_type_display()} nearby',
+                    'rating': 4.0,
+                    'media_url': media_url_fallback,
+                    'description': loc_obj.description,
+                    'location_type_display': loc_obj.get_location_type_display()
+                })
+
+    # Limit to 6 recommendations. This structure is already a list of dicts.
+    return raw_recommendations[:6]
 
 def get_user_preferences(user):
     """Get user preferences with defaults"""
