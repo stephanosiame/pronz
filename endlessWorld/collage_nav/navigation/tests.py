@@ -5,7 +5,7 @@ from django.utils import timezone
 import uuid
 import json
 
-from .models import CustomUser, Location, Recommendation, UserLocation
+from .models import CustomUser, Location, Recommendation, UserLocation, RouteRequest # Added RouteRequest
 from .forms import CustomUserRegistrationForm, TokenVerificationForm, PasswordResetRequestForm
 from .views import COICT_CENTER_LAT, COICT_CENTER_LON, COICT_BOUNDS_OFFSET, STRICT_BOUNDS, get_smart_recommendations
 
@@ -211,6 +211,51 @@ class RecommendationAreaTests(TestCase):
         self.assertNotIn(loc5_office.location_id, recommended_location_ids, "Office location should not be recommended in the morning.")
 
 
+# --- User Related API Tests ---
+class UserRelatedApiTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user_with_loc = create_user(username="user_with_loc", phone_number="+255700000013")
+        self.user_no_loc = create_user(username="user_no_loc", phone_number="+255700000014")
+
+        # Create location history for user_with_loc
+        self.loc_point1 = Point(39.2400, -6.7712, srid=4326) # lon, lat
+        self.loc_point2 = Point(39.2405, -6.7715, srid=4326) # newer
+        UserLocation.objects.create(user=self.user_with_loc, location=self.loc_point1, timestamp=timezone.now() - timezone.timedelta(hours=1))
+        self.latest_user_location = UserLocation.objects.create(user=self.user_with_loc, location=self.loc_point2, timestamp=timezone.now())
+
+    def test_get_last_user_location_success(self):
+        self.client.login(username="user_with_loc", password="password123")
+        response = self.client.get(reverse('get_last_user_location'))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+        self.assertAlmostEqual(data['latitude'], self.loc_point2.y)
+        self.assertAlmostEqual(data['longitude'], self.loc_point2.x)
+        self.assertIn('timestamp', data)
+
+    def test_get_last_user_location_no_history(self):
+        self.client.login(username="user_no_loc", password="password123")
+        response = self.client.get(reverse('get_last_user_location'))
+        self.assertEqual(response.status_code, 200) # View returns 200 but success: False
+        data = response.json()
+        self.assertFalse(data['success'])
+        self.assertEqual(data['message'], 'No location history found for this user.')
+
+    def test_get_last_user_location_not_logged_in(self):
+        response = self.client.get(reverse('get_last_user_location'))
+        self.assertEqual(response.status_code, 302) # Should redirect to login
+        self.assertTrue(reverse('login') in response.url)
+
+    def test_get_last_user_location_wrong_method(self):
+        self.client.login(username="user_with_loc", password="password123")
+        response = self.client.post(reverse('get_last_user_location')) # Using POST
+        self.assertEqual(response.status_code, 405) # Method Not Allowed
+        data = response.json()
+        self.assertFalse(data['success'])
+        self.assertEqual(data['message'], 'Invalid request method. Only GET is allowed.')
+
+
 # --- Boundary Restriction Tests ---
 class BoundaryRestrictionTests(TestCase):
     def setUp(self):
@@ -322,6 +367,125 @@ class AdminAreaTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, loc.name) # Check if location name is in the form
 
+
+# --- Directions API Tests ---
+class DirectionsApiTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = create_user(username="dir_user", phone_number="+255700000015")
+        self.client.login(username="dir_user", password="password123")
+
+        self.loc_a = create_location(name="Location A", lat=COICT_CENTER_LAT, lon=COICT_CENTER_LON)
+        self.loc_b = create_location(name="Location B", lat=COICT_CENTER_LAT + 0.001, lon=COICT_CENTER_LON + 0.001)
+
+        self.origin_coords = (COICT_CENTER_LAT - 0.0005, COICT_CENTER_LON - 0.0005) # lat, lon
+        self.dest_coords = (COICT_CENTER_LAT + 0.0005, COICT_CENTER_LON + 0.0005)   # lat, lon
+
+    def _post_get_directions(self, params):
+        return self.client.post(reverse('get_directions'), json.dumps(params), content_type='application/json')
+
+    def test_get_directions_origin_coords_dest_id(self):
+        params = {
+            'from_latitude': self.origin_coords[0],
+            'from_longitude': self.origin_coords[1],
+            'to_id': str(self.loc_b.location_id)
+        }
+        response = self._post_get_directions(params)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['route']['source']['name'], "Current Location")
+        self.assertAlmostEqual(data['route']['source']['coordinates']['lat'], self.origin_coords[0])
+        self.assertEqual(data['route']['destination']['name'], self.loc_b.name)
+
+    def test_get_directions_origin_id_dest_coords(self):
+        params = {
+            'from_id': str(self.loc_a.location_id),
+            'to_latitude': self.dest_coords[0],
+            'to_longitude': self.dest_coords[1]
+        }
+        response = self._post_get_directions(params)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['route']['source']['name'], self.loc_a.name)
+        self.assertEqual(data['route']['destination']['name'], "Selected Destination")
+        self.assertAlmostEqual(data['route']['destination']['coordinates']['lat'], self.dest_coords[0])
+
+    def test_get_directions_origin_coords_dest_coords(self):
+        params = {
+            'from_latitude': self.origin_coords[0],
+            'from_longitude': self.origin_coords[1],
+            'to_latitude': self.dest_coords[0],
+            'to_longitude': self.dest_coords[1]
+        }
+        response = self._post_get_directions(params)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['route']['source']['name'], "Current Location")
+        self.assertEqual(data['route']['destination']['name'], "Selected Destination")
+
+    def test_get_directions_origin_fallback_last_known(self):
+        # Create a last known location for self.user
+        last_known_point = Point(COICT_CENTER_LON - 0.002, COICT_CENTER_LAT - 0.002, srid=4326)
+        UserLocation.objects.create(user=self.user, location=last_known_point, timestamp=timezone.now())
+
+        params = {'to_id': str(self.loc_b.location_id)} # No explicit origin
+        response = self._post_get_directions(params)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['route']['source']['name'], "Current Location") # Name given by calculate_route for coords
+        self.assertAlmostEqual(data['route']['source']['coordinates']['lat'], last_known_point.y)
+        self.assertAlmostEqual(data['route']['source']['coordinates']['lng'], last_known_point.x)
+
+    def test_get_directions_insufficient_params_no_origin(self):
+        # User has no last known location for this test
+        UserLocation.objects.filter(user=self.user).delete()
+        params = {'to_id': str(self.loc_b.location_id)}
+        response = self._post_get_directions(params)
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertFalse(data['success'])
+        self.assertIn('Origin location or coordinates missing', data['error'])
+
+    def test_get_directions_insufficient_params_no_destination(self):
+        params = {'from_id': str(self.loc_a.location_id)}
+        response = self._post_get_directions(params)
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertFalse(data['success'])
+        self.assertIn('Destination location or coordinates missing', data['error'])
+
+    def test_route_request_created_for_id_based_directions(self):
+        initial_count = RouteRequest.objects.count()
+        params = {
+            'from_id': str(self.loc_a.location_id),
+            'to_id': str(self.loc_b.location_id)
+        }
+        self._post_get_directions(params)
+        self.assertEqual(RouteRequest.objects.count(), initial_count + 1)
+
+    def test_route_request_not_created_for_coord_based_origin(self):
+        initial_count = RouteRequest.objects.count()
+        params = {
+            'from_latitude': self.origin_coords[0],
+            'from_longitude': self.origin_coords[1],
+            'to_id': str(self.loc_b.location_id)
+        }
+        self._post_get_directions(params)
+        self.assertEqual(RouteRequest.objects.count(), initial_count)
+
+    def test_route_request_not_created_for_coord_based_destination(self):
+        initial_count = RouteRequest.objects.count()
+        params = {
+            'from_id': str(self.loc_a.location_id),
+            'to_latitude': self.dest_coords[0],
+            'to_longitude': self.dest_coords[1]
+        }
+        self._post_get_directions(params)
+        self.assertEqual(RouteRequest.objects.count(), initial_count)
 
 # --- Token Verification Tests (already started) ---
 class TokenVerificationTests(TestCase):

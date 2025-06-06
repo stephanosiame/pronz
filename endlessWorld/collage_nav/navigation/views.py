@@ -426,59 +426,85 @@ def search_locations(request):
 def get_directions(request):
     """Get directions between two points with route optimization"""
     if request.method == 'POST':
-        data = json.loads(request.body)
-        from_location_id = data.get('from')
-        to_location_id = data.get('to')
-        transport_mode = data.get('mode', 'walking')  # walking, driving, cycling
-        
         try:
-            from_location = Location.objects.get(location_id=from_location_id)
-            to_location = Location.objects.get(location_id=to_location_id)
-            
-            # Calculate route with transport mode
-            route_data = calculate_route(from_location, to_location, transport_mode)
-            
-            # Save route request for analytics
-            RouteRequest.objects.create(
-                user=request.user,
-                from_location=from_location,
-                to_location=to_location,
+            data = json.loads(request.body)
+            transport_mode = data.get('mode', 'walking')
+
+            from_location_id = data.get('from_id') # Changed from 'from'
+            to_location_id = data.get('to_id')     # Changed from 'to'
+
+            from_lat = data.get('from_latitude')
+            from_lon = data.get('from_longitude')
+            to_lat = data.get('to_latitude')
+            to_lon = data.get('to_longitude')
+
+            from_location_obj = None
+            to_location_obj = None
+            from_coords_tuple = None
+            to_coords_tuple = None
+
+            # Origin
+            if from_location_id:
+                from_location_obj = Location.objects.get(location_id=from_location_id)
+            elif from_lat is not None and from_lon is not None:
+                from_coords_tuple = (float(from_lat), float(from_lon))
+            else:
+                # Try to get user's last known location as a fallback origin
+                last_user_loc = UserLocation.objects.filter(user=request.user).order_by('-timestamp').first()
+                if last_user_loc and last_user_loc.location:
+                    from_coords_tuple = (last_user_loc.location.y, last_user_loc.location.x)
+                    print(f"Using user's last known location as origin: {from_coords_tuple}") # For logging
+                else: # If no ID, no coords, and no last known location
+                    return JsonResponse({'success': False, 'error': 'Origin location or coordinates missing, and no last known location found.'}, status=400)
+
+
+            # Destination
+            if to_location_id:
+                to_location_obj = Location.objects.get(location_id=to_location_id)
+            elif to_lat is not None and to_lon is not None:
+                to_coords_tuple = (float(to_lat), float(to_lon))
+            else:
+                return JsonResponse({'success': False, 'error': 'Destination location or coordinates missing'}, status=400)
+
+            route_data = calculate_route(
+                from_location=from_location_obj,
+                to_location=to_location_obj,
                 transport_mode=transport_mode,
-                timestamp=timezone.now()
+                from_coordinates=from_coords_tuple,
+                to_coordinates=to_coords_tuple
             )
             
-            # Send SMS notification if enabled and route is long
-            if (request.user.notifications_enabled and 
-                route_data.get('distance', 0) > 2000):  # > 2km
-                
-                message = f"Route to {to_location.name} is {route_data['distance']}m. Estimated time: {route_data['duration']} minutes. Stay safe!"
-                send_sms(request.user.phone_number, message)
-                
-                SMSAlert.objects.create(
+            # Analytics and SMS sending logic
+            if from_location_obj and to_location_obj: # Only if both are from existing Location instances
+                RouteRequest.objects.create(
                     user=request.user,
-                    message=message,
-                    alert_type='navigation',
-                    is_sent=True,
-                    sent_at=timezone.now()
+                    from_location=from_location_obj,
+                    to_location=to_location_obj,
+                    transport_mode=transport_mode,
+                    timestamp=timezone.now()
                 )
-            
-            return JsonResponse({
-                'success': True,
-                'route': route_data
-            })
-            
+                if request.user.notifications_enabled and route_data.get('distance', 0) > 2000:
+                    message = f"Route to {to_location_obj.name} is {route_data['distance']:.0f}m. Estimated time: {route_data['duration']} minutes."
+                    send_sms(request.user.phone_number, message)
+                    SMSAlert.objects.create(user=request.user, message=message, alert_type='navigation', is_sent=True, sent_at=timezone.now())
+            elif to_location_obj and request.user.notifications_enabled and route_data.get('distance', 0) > 2000 : # SMS if destination is known
+                 message = f"Route to {to_location_obj.name} is {route_data['distance']:.0f}m. Estimated time: {route_data['duration']} minutes."
+                 send_sms(request.user.phone_number, message)
+                 SMSAlert.objects.create(user=request.user, message=message, alert_type='navigation', is_sent=True, sent_at=timezone.now())
+
+
+            return JsonResponse({'success': True, 'route': route_data})
+
         except Location.DoesNotExist:
-            return JsonResponse({
-                'success': False,
-                'error': 'Location not found'
-            })
+            return JsonResponse({'success': False, 'error': 'Location not found'}, status=404)
+        except ValueError as ve:
+            return JsonResponse({'success': False, 'error': str(ve)}, status=400)
         except Exception as e:
-            return JsonResponse({
-                'success': False,
-                'error': str(e)
-            })
+            # It's good practice to log the actual exception e to your logging system
+            print(f"Unexpected error in get_directions: {e}") # Basic logging
+            return JsonResponse({'success': False, 'error': 'An unexpected error occurred. Please try again.'}, status=500)
     
-    return JsonResponse({'success': False, 'error': 'Invalid request method'})
+    return JsonResponse({'success': False, 'error': 'Invalid request method. Please use POST.'}, status=405)
 
 @login_required
 def profile_view(request):
@@ -725,6 +751,30 @@ def update_preferences(request):
         })
     
     return JsonResponse({'success': False})
+
+@login_required
+def get_last_user_location(request):
+    if request.method == 'GET':
+        try:
+            last_location_obj = UserLocation.objects.filter(user=request.user).latest('timestamp')
+            if last_location_obj and last_location_obj.location: # Check if location PointField is not null
+                return JsonResponse({
+                    'success': True,
+                    'latitude': last_location_obj.location.y,
+                    'longitude': last_location_obj.location.x,
+                    'timestamp': last_location_obj.timestamp
+                })
+            else:
+                # This case might be rare if UserLocation always saves a valid Point.
+                return JsonResponse({'success': False, 'message': 'Last location data is invalid or empty.'})
+        except UserLocation.DoesNotExist:
+            return JsonResponse({'success': False, 'message': 'No location history found for this user.'})
+        except Exception as e:
+            # Log the exception e for server-side debugging
+            print(f"Error in get_last_user_location: {e}") # Basic logging
+            return JsonResponse({'success': False, 'message': 'An error occurred while fetching last location.'}, status=500)
+    else:
+        return JsonResponse({'success': False, 'message': 'Invalid request method. Only GET is allowed.'}, status=405)
 
 @login_required
 def get_location_details_json(request, location_id):

@@ -17,4 +17,5 @@ urlpatterns = [
     path('api/directions/', views.get_directions, name='get_directions'),
     path('api/update-location/', views.update_location, name='update_location'),
     path('api/location-details/<uuid:location_id>/', views.get_location_details_json, name='get_location_details_json'),
+    path('api/get-last-user-location/', views.get_last_user_location, name='get_last_user_location'),
 ]

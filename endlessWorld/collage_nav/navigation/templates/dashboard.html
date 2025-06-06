@@ -119,7 +119,44 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="https://unpkg.com/leaflet.movingmarker@0.3.0/dist/leaflet.movingmarker.min.js"></script>
 <script>
+    let currentRoutePolyline = null;
+    let animatedNavigationMarker = null;
+    let mapInstance = null; // Will be initialized once map is ready or dynamically found
+
+    // Function to initialize or find the map instance
+    function getMapInstance() {
+        if (mapInstance && typeof mapInstance.panTo === 'function') {
+            return mapInstance;
+        }
+        // Default assumption based on Folium's typical naming with div id="map"
+        let foundMap = window.map_map;
+        if (foundMap && typeof foundMap.panTo === 'function') {
+            mapInstance = foundMap;
+            return mapInstance;
+        }
+        // Dynamic finder if default not found
+        for (const key in window) {
+            if (key.startsWith('map_') && window[key] && typeof window[key].panTo === 'function') {
+                mapInstance = window[key];
+                console.log("Dynamically found map instance:", key);
+                return mapInstance;
+            }
+        }
+        console.error("Folium map instance not found. Cannot interact with map.");
+        return null;
+    }
+
+    // It's good practice to ensure map is ready before trying to use it,
+    // though Folium usually makes it available globally when its scripts run.
+    // We can try to get it once the DOM is loaded or when first needed.
+    document.addEventListener('DOMContentLoaded', function() {
+        // Try to get map instance when DOM is loaded, it might already be available
+        mapInstance = getMapInstance();
+    });
+
+
     // Search functionality
     document.getElementById('searchInput').addEventListener('input', function() {
         const query = this.value.trim();
@@ -161,63 +198,210 @@
     // Show location on map
     function showLocation(locationId) {
         console.log("Attempting to show searched location on map for Location ID:", locationId);
-
-        // Dynamically find the map object
-        let mapInstance = window.map_map; // Default assumption
-        if (!mapInstance) {
-            for (const key in window) {
-                if (key.startsWith('map_') && window[key] && typeof window[key].panTo === 'function') {
-                    mapInstance = window[key];
-                    console.log("Dynamically found map instance:", key);
-                    break;
-                }
-            }
-        }
-
-        if (!mapInstance) {
-            console.error("Folium map instance (e.g., window.map_map or window.map_<map_id>) not found. Cannot interact with map.");
-            alert("Error: Map object not found. Cannot display location on map.");
+        let currentMap = getMapInstance();
+        if (!currentMap) {
+            alert("Map is not available to display location.");
             return;
         }
 
-        // Fetch location coordinates.
-        // The URL is constructed based on the urls.py pattern: path('api/location-details/<uuid:location_id>/', ...)
         fetch(`/api/location-details/${locationId}/`)
             .then(response => response.json())
-            .then(data => {
-                if (data.success && data.latitude && data.longitude) {
-                    const lat = data.latitude;
-                    const lon = data.longitude;
+            .then(locationData => {
+                if (locationData.success && locationData.latitude && locationData.longitude) {
+                    const lat = locationData.latitude;
+                    const lon = locationData.longitude;
+                    console.log(`Fetched coordinates for ${locationData.name}: Lat ${lat}, Lon ${lon}`);
 
-                    console.log(`Fetched coordinates for ${data.name}: Lat ${lat}, Lon ${lon}`);
+                    currentMap.panTo([lat, lon]);
+                    currentMap.setZoom(18);
 
-                    // Pan and zoom the map
-                    mapInstance.panTo([lat, lon]);
-                    mapInstance.setZoom(18); // Zoom in to a close level
-
-                    // Manage search result marker
                     if (window.searchResultMarker) {
-                        mapInstance.removeLayer(window.searchResultMarker);
+                        currentMap.removeLayer(window.searchResultMarker);
                     }
 
-                    // Using a default Leaflet marker, customize as needed
-                    window.searchResultMarker = L.marker([lat, lon]).addTo(mapInstance)
-                        .bindPopup(`<b>${data.name}</b><br>Searched Location`)
+                    const popupContent = `
+                        <b>${locationData.name}</b><br>
+                        Searched Location<hr>
+                        <button class="btn btn-sm btn-primary w-100" onclick="setAsDestination('${locationId}', ${lat}, ${lon})">
+                            Navigate to Here
+                        </button>
+                    `;
+
+                    window.searchResultMarker = L.marker([lat, lon]).addTo(currentMap)
+                        .bindPopup(popupContent)
                         .openPopup();
 
-                    console.log("Map panned and zoomed for searched location. Marker added.");
-                    // Scroll to the map if it's not fully visible
+                    console.log("Map panned and zoomed. Marker with navigation button added.");
                     document.getElementById('map').scrollIntoView({ behavior: 'smooth' });
-
                 } else {
-                    console.error("Failed to fetch location details for searched location or missing coordinates:", data.error);
-                    alert("Could not fetch location details for search: " + (data.error || "Unknown error"));
+                    console.error("Failed to fetch location details for search:", locationData.error);
+                    alert("Could not fetch location details: " + (locationData.error || "Unknown error"));
                 }
             })
             .catch(error => {
-                console.error("Error fetching location details for searched location:", error);
-                alert("Error fetching location details for search. Please check console.");
+                console.error("Error fetching location details for search:", error);
+                alert("Error fetching location details. Please check console.");
             });
+    }
+
+    function getOriginForNavigation(callback) {
+        const DEFAULT_ORIGIN_ID_PLACEHOLDER = "YOUR_COICT_CENTER_LOCATION_ID_REPLACE_ME"; // DEVELOPER MUST REPLACE
+
+        function handleFallback(errorType = "last_known_failed") {
+            // Fallback: Make an AJAX call to get the user's last known location.
+            // {% url 'get_last_user_location' %} is a placeholder and will not work until the view and URL are created.
+            // For testing, this path might lead to the default ID if the URL isn't set up.
+            fetch("{% url 'get_last_user_location' %}")
+                .then(response => {
+                    if (!response.ok) throw new Error(`Network response for last_known_location was not ok (${response.status})`);
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.success && data.latitude && data.longitude) {
+                        console.log("Using last known location as origin:", data);
+                        callback({ type: 'coords', lat: data.latitude, lon: data.longitude, from: 'last_known' });
+                    } else {
+                        console.warn("Last known location not available or invalid, falling back to default ID. Server response:", data);
+                        if (DEFAULT_ORIGIN_ID_PLACEHOLDER === "YOUR_COICT_CENTER_LOCATION_ID_REPLACE_ME" || DEFAULT_ORIGIN_ID_PLACEHOLDER.length !== 36) {
+                             alert("Developer: Default Origin ID (COICT_CENTER_LOCATION_ID) is not configured correctly in dashboard.html.");
+                             callback({type: 'error', message: 'Default origin ID not set or invalid.'});
+                             return;
+                        }
+                        console.warn("Using default origin ID:", DEFAULT_ORIGIN_ID_PLACEHOLDER);
+                        callback({ type: 'id', id: DEFAULT_ORIGIN_ID_PLACEHOLDER, from: 'default_fallback' });
+                    }
+                })
+                .catch(err => {
+                    console.error("Error fetching last known location or initial fallback failed:", err);
+                     if (DEFAULT_ORIGIN_ID_PLACEHOLDER === "YOUR_COICT_CENTER_LOCATION_ID_REPLACE_ME" || DEFAULT_ORIGIN_ID_PLACEHOLDER.length !== 36) {
+                         alert("Developer: Default Origin ID (COICT_CENTER_LOCATION_ID) is not configured correctly in dashboard.html.");
+                         callback({type: 'error', message: 'Default origin ID not set or invalid after error.'});
+                         return;
+                    }
+                    console.warn("Using default origin ID after error:", DEFAULT_ORIGIN_ID_PLACEHOLDER);
+                    callback({ type: 'id', id: DEFAULT_ORIGIN_ID_PLACEHOLDER, from: 'default_fallback_on_error' });
+                });
+        }
+
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(
+                function(position) { // Success
+                    console.log("Using live geolocation as origin.");
+                    callback({
+                        type: 'coords',
+                        lat: position.coords.latitude,
+                        lon: position.coords.longitude,
+                        from: 'live_geolocation'
+                    });
+                },
+                function(error) { // Geolocation failed or denied
+                    console.warn("Live geolocation failed:", error.message, ". Attempting fallback.");
+                    handleFallback("live_geolocation_failed");
+                },
+                { timeout: 5000, enableHighAccuracy: true }
+            );
+        } else { // Geolocation not supported by browser
+            console.warn("Geolocation not supported by this browser. Attempting fallback.");
+            handleFallback("geolocation_not_supported");
+        }
+    }
+
+    function setAsDestination(destinationId, destLat, destLng) {
+        console.log(`Preparing navigation to Destination ID: ${destinationId}`);
+        let currentMap = getMapInstance();
+         if (!currentMap) {
+            alert("Map is not available to set destination.");
+            return;
+        }
+        if (currentMap && typeof currentMap.closePopup === 'function') {
+            currentMap.closePopup();
+        }
+
+        getOriginForNavigation(function(origin) {
+            if (origin.type === 'error') {
+                alert(`Could not determine origin for navigation: ${origin.message}`);
+                return;
+            }
+
+            let navigationParams = { to_id: destinationId };
+
+            if (origin.type === 'coords') {
+                navigationParams.from_latitude = origin.lat;
+                navigationParams.from_longitude = origin.lon;
+                console.log(`Navigating from Coords (Source: ${origin.from}): (${origin.lat}, ${origin.lon}) to ID: ${destinationId}`);
+            } else { // type === 'id'
+                navigationParams.from_id = origin.id;
+                console.log(`Navigating from Location ID (Source: ${origin.from}): ${origin.id} to ID: ${destinationId}`);
+            }
+
+            // This is where the old getDirections AJAX call and response handling logic goes
+            fetch("{% url 'get_directions' %}", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}' },
+                body: JSON.stringify(navigationParams)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    if (currentRoutePolyline) currentMap.removeLayer(currentRoutePolyline);
+                    if (animatedNavigationMarker) {
+                        // For L.Marker.MovingMarker, it doesn't have a .stop() method. Removing it is enough.
+                        currentMap.removeLayer(animatedNavigationMarker);
+                    }
+
+                    const latLngs = data.route.path.map(coord => L.latLng(coord[0], coord[1]));
+                    if (latLngs.length < 2) {
+                        alert("Route path is too short to display."); return;
+                    }
+                    currentRoutePolyline = L.polyline(latLngs, { color: 'red', weight: 5, opacity: 0.8 }).addTo(currentMap);
+                    currentMap.fitBounds(currentRoutePolyline.getBounds().pad(0.1));
+
+                    const pointerIcon = L.icon({
+                        iconUrl: "{% static 'img/navigation_pointer.png' %}",
+                        iconSize: [25, 41], iconAnchor: [12, 41]
+                    });
+
+                    const totalDurationMs = data.route.estimated_time * 60 * 1000;
+
+                    animatedNavigationMarker = L.Marker.movingMarker(latLngs, [totalDurationMs], {
+                        autostart: true, loop: false, icon: pointerIcon
+                    });
+
+                    animatedNavigationMarker.on('end', function() {
+                        console.log("Navigation animation finished.");
+                        if(currentMap && latLngs.length > 0) { // Ensure map and path still valid
+                             L.marker(latLngs[latLngs.length - 1], {icon: pointerIcon})
+                                .addTo(currentMap)
+                                .bindPopup(`Arrived at ${data.route.destination.name || 'destination'}`)
+                                .openPopup();
+                        }
+                        // Optionally remove the animated marker itself after it ends and is replaced by a static one
+                        if(currentMap && animatedNavigationMarker) currentMap.removeLayer(animatedNavigationMarker);
+
+                    });
+                    currentMap.addLayer(animatedNavigationMarker);
+
+                    const modal = new bootstrap.Modal(document.getElementById('directionsModal'));
+                    const routeDetailsEl = document.getElementById('routeDetails');
+                    routeDetailsEl.innerHTML = `
+                        <h6>From: ${data.route.source.name}</h6>
+                        <h6>To: ${data.route.destination.name}</h6>
+                        <p>Distance: ${data.route.distance.toFixed(0)} meters</p>
+                        <p>Estimated time: ${data.route.estimated_time} minutes</p>
+                        <hr><h6>Steps:</h6>
+                        <ol>${data.route.steps.map(step => `<li>${step.instruction} (${step.distance.toFixed(0)}m, ${Math.round(step.duration/60)} min)</li>`).join('')}</ol>
+                    `;
+                    modal.show();
+                    document.getElementById('map').scrollIntoView({ behavior: 'smooth' });
+                } else {
+                    alert("Error getting directions: " + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(err => {
+                console.error("Error in setAsDestination's fetch call:", err);
+                alert("Could not retrieve new directions. Please check console.");
+            });
+        });
     }
     
     // Navigation functions
@@ -268,46 +452,9 @@
         alert("Zooming out - would be implemented with map API");
     }
     
-    // Get directions between two points
-    function getDirections(fromId, toId) {
-        fetch("{% url 'get_directions' %}", {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRFToken': '{{ csrf_token }}'
-            },
-            body: JSON.stringify({
-                from: fromId,
-                to: toId
-            })
-        }).then(response => response.json())
-          .then(data => {
-              if (data.success) {
-                  const modal = new bootstrap.Modal(document.getElementById('directionsModal'));
-                  const routeDetails = document.getElementById('routeDetails');
-                  
-                  // Show route details
-                  routeDetails.innerHTML = `
-                      <h6>From: ${data.route.source.name}</h6>
-                      <h6>To: ${data.route.destination.name}</h6>
-                      <p>Distance: ${data.route.distance.toFixed(0)} meters</p>
-                      <p>Estimated time: ${data.route.estimated_time} minutes</p>
-                      <hr>
-                      <h6>Steps:</h6>
-                      <ol>
-                          ${data.route.steps.map(step => `<li>${step.instruction} (${step.distance.toFixed(0)}m, ${Math.round(step.duration/60)} min)</li>`).join('')}
-                      </ol>
-                  `;
-                  
-                  // Show route on map (would be implemented with map API)
-                  modal.show();
-              } else {
-                  alert("Error getting directions: " + (data.error || 'Unknown error'));
-              }
-          });
-    }
+    // Old getDirections(fromId, toId) function is now removed / integrated into setAsDestination.
 
-    // Placeholder function for showing recommendation on map
+    // Function for showing recommendation on map (remains mostly unchanged)
     function showRecommendationOnMap(locationId, mediaUrl) {
         console.log("Attempting to show recommendation on map for Location ID:", locationId, "Media URL:", mediaUrl);
 
