@@ -67,19 +67,44 @@ def generate_map_html(center_point, locations=None, route=None):
     # Return HTML representation
     return m._repr_html_()
 
-def calculate_route(from_location, to_location, transport_mode='walking'):
-    """Calculate route between two locations"""
-    # In a real implementation, you would use a routing service like OSRM, Mapbox, or Google Directions API
-    # Here we'll simulate a simple straight-line route
-    
+def calculate_route(from_location=None, to_location=None, transport_mode='walking', from_coordinates=None, to_coordinates=None):
+    """
+    Calculate route between two points, which can be Location instances or coordinate tuples.
+    Coordinates are expected as (latitude, longitude).
+    """
+    # Determine origin point and name
+    if from_location:
+        origin_point = from_location.coordinates
+        origin_name = from_location.name
+        origin_id = str(from_location.location_id)
+    elif from_coordinates: # expects (latitude, longitude)
+        origin_point = Point(from_coordinates[1], from_coordinates[0], srid=4326) # Point(lon, lat)
+        origin_name = "Current Location"
+        origin_id = None
+    else:
+        raise ValueError("Either from_location or from_coordinates must be provided for the origin.")
+
+    # Determine destination point and name
+    if to_location:
+        dest_point = to_location.coordinates
+        dest_name = to_location.name
+        dest_id = str(to_location.location_id)
+    elif to_coordinates: # expects (latitude, longitude)
+        dest_point = Point(to_coordinates[1], to_coordinates[0], srid=4326) # Point(lon, lat)
+        dest_name = "Selected Destination"
+        dest_id = None
+    else:
+        raise ValueError("Either to_location or to_coordinates must be provided for the destination.")
+
+    # Ensure points are valid GEOSGeometry objects
+    if not isinstance(origin_point, Point) or not isinstance(dest_point, Point):
+        raise ValueError("Origin or destination coordinates are invalid or could not be determined.")
+
     # Create a line between the two points
-    route_path = LineString([from_location.coordinates, to_location.coordinates])
+    # route_path_gis = LineString([origin_point, dest_point]) # Not directly used in simple path
     
     # Calculate distance in meters
-    distance = geodesic(
-        (from_location.coordinates.y, from_location.coordinates.x),
-        (to_location.coordinates.y, to_location.coordinates.x)
-    ).meters
+    distance = geodesic((origin_point.y, origin_point.x), (dest_point.y, dest_point.x)).meters
     
     # Estimate time based on transport mode
     speed_multipliers = {
@@ -89,41 +114,31 @@ def calculate_route(from_location, to_location, transport_mode='walking'):
     }
     
     speed = speed_multipliers.get(transport_mode, 1.4)
-    estimated_time = int(distance / speed / 60)  # in minutes
-    duration_seconds = int(distance / speed)     # in seconds
+    estimated_time_minutes = int(distance / speed / 60) if speed > 0 else float('inf')
+    duration_seconds = int(distance / speed) if speed > 0 else float('inf')
     
     # Create route data structure
     route_data = {
         'source': {
-            'id': str(from_location.location_id),
-            'name': from_location.name,
-            'coordinates': {
-                'lat': from_location.coordinates.y,
-                'lng': from_location.coordinates.x
-            }
+            'id': origin_id,
+            'name': origin_name,
+            'coordinates': {'lat': origin_point.y, 'lng': origin_point.x}
         },
         'destination': {
-            'id': str(to_location.location_id),
-            'name': to_location.name,
-            'coordinates': {
-                'lat': to_location.coordinates.y,
-                'lng': to_location.coordinates.x
-            }
+            'id': dest_id,
+            'name': dest_name,
+            'coordinates': {'lat': dest_point.y, 'lng': dest_point.x}
         },
-        'path': [(from_location.coordinates.y, from_location.coordinates.x),
-                (to_location.coordinates.y, to_location.coordinates.x)],
+        'path': [(origin_point.y, origin_point.x), (dest_point.y, dest_point.x)],
         'distance': distance,
-        'estimated_time': estimated_time,
-        'duration': estimated_time,  # Added for compatibility
-        'steps': [
-            {
-                'instruction': f"Walk from {from_location.name} to {to_location.name}",
-                'distance': distance,
-                'duration': duration_seconds  # in seconds
-            }
-        ]
+        'estimated_time': estimated_time_minutes,
+        'duration': estimated_time_minutes,
+        'steps': [{
+            'instruction': f"Travel from {origin_name} to {dest_name}",
+            'distance': distance,
+            'duration': duration_seconds
+        }]
     }
-    
     return route_data
 
 def generate_random_route(from_point, to_point):
