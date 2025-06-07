@@ -306,7 +306,9 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None, de
     # Add Layer Control to the map
     folium.LayerControl().add_to(campus_map)
     
-    return campus_map._repr_html_()
+    map_id = campus_map.get_name() # Get the map's generated ID
+    map_html_representation = campus_map._repr_html_()
+    return {'html': map_html_representation, 'id': map_id}
 
 @login_required
 def dashboard_view(request):
@@ -365,7 +367,7 @@ def dashboard_view(request):
     recent_searches = UserSearch.objects.filter(user=request.user).order_by('-timestamp')[:5]
     
     # Generate restricted campus map HTML, passing the filtered list and bounds
-    map_html = generate_restricted_campus_map(user_location, nearby_locations_list, defined_bounds=current_strict_bounds)
+    map_data = generate_restricted_campus_map(user_location, nearby_locations_list, defined_bounds=current_strict_bounds)
     
     # Get user preferences for theme, zoom, etc.
     user_preferences = get_user_preferences(request.user)
@@ -374,7 +376,8 @@ def dashboard_view(request):
         'nearby_locations': nearby_locations_list, # Use the filtered and sliced list
         'recommendations': recommendations,
         'recent_searches': recent_searches,
-        'map_html': map_html,
+        'map_html': map_data['html'],
+        'map_id': map_data['id'], # Pass map_id to the template
         'user_location': user_location,
         'user_preferences': user_preferences,
         'total_locations': len(nearby_locations_list), # Count of the filtered list
