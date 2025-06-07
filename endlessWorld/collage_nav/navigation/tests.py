@@ -4,8 +4,9 @@ from django.contrib.gis.geos import Point
 from django.utils import timezone
 import uuid
 import json
+from unittest.mock import patch, call
 
-from .models import CustomUser, Location, Recommendation, UserLocation, RouteRequest # Added RouteRequest
+from .models import CustomUser, Location, Recommendation, UserLocation, RouteRequest, SMSAlert # Added RouteRequest and SMSAlert
 from .forms import CustomUserRegistrationForm, TokenVerificationForm, PasswordResetRequestForm
 from .views import COICT_CENTER_LAT, COICT_CENTER_LON, COICT_BOUNDS_OFFSET, STRICT_BOUNDS, get_smart_recommendations
 
@@ -513,12 +514,15 @@ class TokenVerificationTests(TestCase):
         })
         self.assertRedirects(response, reverse('dashboard'))
 
-    def test_register_view_flow(self):
+    @patch('endlessWorld.collage_nav.navigation.views.send_sms')
+    def test_register_view_flow(self, mock_send_sms):
+        mock_send_sms.return_value = True # Simulate successful SMS sending
         user_count_before = CustomUser.objects.count()
         phone_number_for_reg = "+255700000004" # Ensure unique
+
         response = self.client.post(reverse('register'), {
             'username': 'new_reg_user',
-            'password': 'password123',
+            'password': 'password123', # Use a valid password defined in settings or common_passwords.txt
             'password2': 'password123',
             'email': 'newreg@example.com',
             'phone_number': phone_number_for_reg,
@@ -526,11 +530,19 @@ class TokenVerificationTests(TestCase):
             'last_name': 'Reg',
             'role': 'student'
         })
+
         self.assertEqual(CustomUser.objects.count(), user_count_before + 1)
         new_user = CustomUser.objects.get(username='new_reg_user')
-        self.assertFalse(new_user.is_verified)
-        self.assertIsNotNone(new_user.verification_token)
-        self.assertRedirects(response, reverse('verify_token', args=[new_user.id]))
+
+        self.assertTrue(new_user.is_verified) # User should be verified immediately
+        self.assertIsNone(new_user.verification_token) # Verification token should be None
+
+        expected_message = "Thanks for Register our app for navigation to CoICT collage"
+        mock_send_sms.assert_called_once_with(new_user.phone_number, expected_message)
+
+        self.assertTrue(SMSAlert.objects.filter(user=new_user, alert_type='welcome', message=expected_message).exists())
+
+        self.assertRedirects(response, reverse('login')) # Should redirect to login
 
     def test_verify_token_view_correct_token(self):
         user = create_user(username="verify_me", phone_number="+255700000005", is_verified=False)
