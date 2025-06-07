@@ -47,24 +47,28 @@ def register_view(request):
         form = CustomUserRegistrationForm(request.POST)
         if form.is_valid():
             user = form.save()
-            
-            # Send verification SMS
-            message = f"Welcome to College Navigation! Your verification code is: {user.verification_token}"
+            user.is_verified = True
+            user.save() # Save the updated is_verified status
+
+            # Send welcome SMS
+            message = "Thanks for Register our app for navigation to CoICT collage"
             sms_sent = send_sms(user.phone_number, message)
             
             if sms_sent:
-                # Create SMS alert record
+                # Create SMS alert record for welcome message
                 SMSAlert.objects.create(
                     user=user,
                     message=message,
-                    alert_type='verification',
+                    alert_type='welcome', # Changed alert_type
                     is_sent=True,
                     sent_at=timezone.now()
                 )
-                messages.success(request, 'Registration successful! Please check your phone for verification code.')
-                return redirect('verify_token', user_id=user.id)
+                messages.success(request, 'Registration successful! You can now log in.')
+                return redirect('login') # Redirect to login page
             else:
-                messages.error(request, 'Registration successful, but SMS could not be sent. Please contact admin.')
+                # If SMS fails, still register the user and redirect to login
+                # but show a message that SMS sending failed.
+                messages.error(request, 'Registration successful, but welcome SMS could not be sent. Please contact admin if this persists.')
                 return redirect('login')
     else:
         form = CustomUserRegistrationForm()
@@ -121,17 +125,8 @@ def verify_token_view(request, user_id):
                 user.verification_token = None
                 user.save()
                 
-                # Send welcome SMS after verification
-                welcome_message = f"Welcome {user.first_name}! Your College Navigation account is now active. You can now access all features including real-time directions and location alerts."
-                send_sms(user.phone_number, welcome_message)
-                
-                SMSAlert.objects.create(
-                    user=user,
-                    message=welcome_message,
-                    alert_type='welcome',
-                    is_sent=True,
-                    sent_at=timezone.now()
-                )
+                # Welcome SMS and alert creation moved to register_view.
+                # This view now only handles token verification.
                 
                 messages.success(request, 'Account verified successfully! You can now log in.')
                 return redirect('login')

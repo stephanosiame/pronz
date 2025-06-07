@@ -4,8 +4,6 @@ from django.contrib.auth import authenticate
 from crispy_forms.helper import FormHelper
 from crispy_forms.layout import Layout, Field, Submit, Div, HTML
 from .models import CustomUser, Location
-import random
-import string
 
 class CustomUserRegistrationForm(UserCreationForm):
     email = forms.EmailField(required=True)
@@ -42,7 +40,7 @@ class CustomUserRegistrationForm(UserCreationForm):
         user.role = self.cleaned_data['role']
         
         # Generate verification token
-        user.verification_token = ''.join(random.choices(string.digits, k=6))
+        # user.verification_token = ''.join(random.choices(string.digits, k=6)) # Line removed as per new registration logic
         
         if commit:
             user.save()
