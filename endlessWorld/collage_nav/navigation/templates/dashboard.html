@@ -93,6 +93,7 @@
             <div class="card-body p-0" style="height: 600px;">
                 <div id="map" style="height: 100%; width: 100%;">
                     {{ map_html|safe }}
+                    <!-- The map_html now includes a script tag that calls initCustomMapLogic -->
                 </div>
             </div>
         </div>
@@ -121,44 +122,146 @@
 {% block scripts %}
 <script src="https://unpkg.com/leaflet.movingmarker@0.3.0/dist/leaflet.movingmarker.min.js"></script>
 <script>
+    // Global variable to hold the map instance, to be set by initCustomMapLogic
+    var mapInstance = null;
+    const DYNAMIC_MAP_ID_FROM_DJANGO = "{{ map_id|escapejs }}";
+    console.log("Django template DYNAMIC_MAP_ID_FROM_DJANGO:", DYNAMIC_MAP_ID_FROM_DJANGO);
+
+    // These variables will be used by functions now made global, so define them in a scope accessible to them.
     let currentRoutePolyline = null;
     let animatedNavigationMarker = null;
-    let mapInstance = null; // Will be initialized once map is ready or dynamically found
+    let searchResultMarker = null;
+    let recommendationMarker = null;
 
-    // Function to initialize or find the map instance
-    function getMapInstance() {
-        if (mapInstance && typeof mapInstance.panTo === 'function') {
-            return mapInstance;
-        }
-        // Default assumption based on Folium's typical naming with div id="map"
-        let foundMap = window.map_map;
-        if (foundMap && typeof foundMap.panTo === 'function') {
-            mapInstance = foundMap;
-            return mapInstance;
-        }
-        // Dynamic finder if default not found
-        for (const key in window) {
-            if (key.startsWith('map_') && window[key] && typeof window[key].panTo === 'function') {
-                mapInstance = window[key];
-                console.log("Dynamically found map instance:", key);
-                return mapInstance;
+    function initCustomMapLogic(generatedMapId) {
+        console.log("initCustomMapLogic called with map ID:", generatedMapId);
+
+        if (window[generatedMapId] && typeof window[generatedMapId].getCenter === 'function') {
+            console.log("SUCCESS: Folium map instance found in initCustomMapLogic using ID:", generatedMapId);
+            mapInstance = window[generatedMapId];
+
+            // For testing, let's try a simple map action here:
+            if (mapInstance.getCenter) {
+                console.log("Map center from initCustomMapLogic:", mapInstance.getCenter());
+            }
+
+        } else {
+            console.error("ERROR: initCustomMapLogic was called, but window[generatedMapId] is not a valid map object.", generatedMapId);
+            // Fallback logic (belt-and-suspenders)
+            if (window.map_map && typeof window.map_map.getCenter === 'function') {
+                console.warn("Found 'window.map_map' as fallback in initCustomMapLogic.");
+                mapInstance = window.map_map;
+            } else {
+                 for (let key in window) {
+                    if (key.startsWith("map_") && key !== generatedMapId && window[key] && typeof window[key].getCenter === 'function') {
+                        console.warn(`Found map instance by iteration as '${key}' in initCustomMapLogic fallback.`);
+                        mapInstance = window[key];
+                        break;
+                    }
+                }
+            }
+            if (!mapInstance) {
+                console.error("CRITICAL: Map instance still not found even after initCustomMapLogic was called and fallbacks attempted.");
+                // alert("Map critical initialization error. Please refresh.");
             }
         }
-        console.error("Folium map instance not found. Cannot interact with map.");
-        return null;
     }
 
-    // It's good practice to ensure map is ready before trying to use it,
-    // though Folium usually makes it available globally when its scripts run.
-    // We can try to get it once the DOM is loaded or when first needed.
+document.addEventListener('DOMContentLoaded', function() {
+    // DOMContentLoaded is still good for attaching listeners to elements that are part of the static HTML.
+    // Functions called by onclick attributes need to be global.
     document.addEventListener('DOMContentLoaded', function() {
-        // Try to get map instance when DOM is loaded, it might already be available
-        mapInstance = getMapInstance();
+        // Initialize mapInstance if initCustomMapLogic hasn't run yet (e.g. script loading order issue)
+        // This is a fallback, primary initialization is via initCustomMapLogic
+        if (!mapInstance && DYNAMIC_MAP_ID_FROM_DJANGO) {
+            console.log("DOMContentLoaded: mapInstance not yet set by initCustomMapLogic. Attempting to find map:", DYNAMIC_MAP_ID_FROM_DJANGO);
+            if(window[DYNAMIC_MAP_ID_FROM_DJANGO] && typeof window[DYNAMIC_MAP_ID_FROM_DJANGO].getCenter === 'function') {
+                mapInstance = window[DYNAMIC_MAP_ID_FROM_DJANGO];
+                console.log("Map instance set during DOMContentLoaded using DYNAMIC_MAP_ID_FROM_DJANGO.");
+            } else {
+                 // Try legacy map_map as a last resort within DOMContentLoaded
+                if (window.map_map && typeof window.map_map.getCenter === 'function') {
+                    console.warn("Map instance set during DOMContentLoaded using legacy 'window.map_map'.");
+                    mapInstance = window.map_map;
+                } else {
+                    console.warn("Map instance still not found in DOMContentLoaded. Waiting for initCustomMapLogic or direct assignment.");
+                }
+            }
+        }
+
+        // Search input listener
+        const searchInput = document.getElementById('searchInput');
+        if (searchInput) {
+            searchInput.addEventListener('input', function() {
+                const query = this.value.trim();
+                if (query.length >= 2) {
+                    fetch(`{% url 'search_locations' %}?q=${query}`)
+                        .then(response => response.json())
+                        .then(data => {
+                            const resultsContainer = document.getElementById('searchResults');
+                            resultsContainer.innerHTML = '';
+                            if (data.locations.length > 0) {
+                                data.locations.forEach(location => {
+                                    const item = document.createElement('a');
+                                    item.href = '#';
+                                    item.className = 'list-group-item list-group-item-action';
+                                    item.innerHTML = `
+                                        <h6>${location.name}</h6>
+                                        <small class="text-muted">${location.location_type}</small>
+                                        <p class="mb-1">${location.description || ''}</p>
+                                    `;
+                                    // Programmatic event listener for search result clicks
+                                    item.addEventListener('click', (e) => {
+                                        e.preventDefault();
+                                        showLocation(location.location_id); // Calls global showLocation
+                                    });
+                                    resultsContainer.appendChild(item);
+                                });
+                            } else {
+                                resultsContainer.innerHTML = '<div class="list-group-item">No results found</div>';
+                            }
+                        });
+                } else {
+                     document.getElementById('searchResults').innerHTML = ''; // Clear results if query is too short
+                }
+            });
+        }
+
+        const searchForm = document.getElementById('searchForm');
+        if (searchForm) {
+            searchForm.addEventListener('submit', function(e) {
+                e.preventDefault(); // Prevent form submission
+            });
+        }
+
+        // Other initializations that depend on the DOM but not necessarily on mapInstance immediately
+        // For example, setting up modal events if any, etc.
     });
 
+    // Map interaction functions are now global
+    // Helper to ensure mapInstance is available for functions called by onclick or programmatically
+    function ensureMapInstance() {
+        if (!mapInstance) {
+            console.warn("ensureMapInstance: mapInstance is not set. Trying to initialize via DYNAMIC_MAP_ID_FROM_DJANGO:", DYNAMIC_MAP_ID_FROM_DJANGO);
+            if (window[DYNAMIC_MAP_ID_FROM_DJANGO] && typeof window[DYNAMIC_MAP_ID_FROM_DJANGO].getCenter === 'function') {
+                 mapInstance = window[DYNAMIC_MAP_ID_FROM_DJANGO];
+                 console.log("ensureMapInstance: mapInstance acquired using DYNAMIC_MAP_ID_FROM_DJANGO.");
+            } else if (window.map_map && typeof window.map_map.getCenter === 'function') { // Last resort fallback
+                mapInstance = window.map_map;
+                console.warn("ensureMapInstance: mapInstance acquired using legacy 'window.map_map'.");
+            } else {
+                 console.error("ensureMapInstance: Could not acquire mapInstance. Map interactions will likely fail.");
+                 // alert("Map is not fully initialized. Please wait a moment or refresh."); // Avoid alert here, let calling function handle
+                 return null; // Indicate failure
+            }
+        }
+        return mapInstance;
+    }
 
-    // Search functionality
-    document.getElementById('searchInput').addEventListener('input', function() {
+    // Search functionality (event listener setup in DOMContentLoaded)
+    // function setupSearchListeners() { ... } // This part is now inside DOMContentLoaded
+
+    // Show location on map
         const query = this.value.trim();
         if (query.length >= 2) {
             fetch(`{% url 'search_locations' %}?q=${query}`)
@@ -196,10 +299,10 @@
     });
     
     // Show location on map
-    function showLocation(locationId) {
+    function showLocation(locationId) { // mapInstance is now a global variable within DOMContentLoaded
         console.log("Attempting to show searched location on map for Location ID:", locationId);
-        let currentMap = getMapInstance();
-        if (!currentMap) {
+        if (!mapInstance) getMapInstance(); // Try to initialize if not already
+        if (!mapInstance) {
             alert("Map is not available to display location.");
             return;
         }
@@ -212,11 +315,11 @@
                     const lon = locationData.longitude;
                     console.log(`Fetched coordinates for ${locationData.name}: Lat ${lat}, Lon ${lon}`);
 
-                    currentMap.panTo([lat, lon]);
-                    currentMap.setZoom(18);
+                    mapInstance.panTo([lat, lon]);
+                    mapInstance.setZoom(18);
 
-                    if (window.searchResultMarker) {
-                        currentMap.removeLayer(window.searchResultMarker);
+                    if (searchResultMarker) { // Use the scoped searchResultMarker
+                        mapInstance.removeLayer(searchResultMarker);
                     }
 
                     const popupContent = `
@@ -227,7 +330,7 @@
                         </button>
                     `;
 
-                    window.searchResultMarker = L.marker([lat, lon]).addTo(currentMap)
+                    searchResultMarker = L.marker([lat, lon]).addTo(mapInstance)
                         .bindPopup(popupContent)
                         .openPopup();
 
@@ -306,15 +409,15 @@
         }
     }
 
-    function setAsDestination(destinationId, destLat, destLng) {
+    function setAsDestination(destinationId, destLat, destLng) { // mapInstance is global
         console.log(`Preparing navigation to Destination ID: ${destinationId}`);
-        let currentMap = getMapInstance();
-         if (!currentMap) {
+        if (!mapInstance) getMapInstance();
+        if (!mapInstance) {
             alert("Map is not available to set destination.");
             return;
         }
-        if (currentMap && typeof currentMap.closePopup === 'function') {
-            currentMap.closePopup();
+        if (mapInstance && typeof mapInstance.closePopup === 'function') {
+            mapInstance.closePopup();
         }
 
         getOriginForNavigation(function(origin) {
@@ -334,7 +437,6 @@
                 console.log(`Navigating from Location ID (Source: ${origin.from}): ${origin.id} to ID: ${destinationId}`);
             }
 
-            // This is where the old getDirections AJAX call and response handling logic goes
             fetch("{% url 'get_directions' %}", {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}' },
@@ -343,18 +445,17 @@
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    if (currentRoutePolyline) currentMap.removeLayer(currentRoutePolyline);
+                    if (currentRoutePolyline) mapInstance.removeLayer(currentRoutePolyline);
                     if (animatedNavigationMarker) {
-                        // For L.Marker.MovingMarker, it doesn't have a .stop() method. Removing it is enough.
-                        currentMap.removeLayer(animatedNavigationMarker);
+                        mapInstance.removeLayer(animatedNavigationMarker);
                     }
 
                     const latLngs = data.route.path.map(coord => L.latLng(coord[0], coord[1]));
                     if (latLngs.length < 2) {
                         alert("Route path is too short to display."); return;
                     }
-                    currentRoutePolyline = L.polyline(latLngs, { color: 'red', weight: 5, opacity: 0.8 }).addTo(currentMap);
-                    currentMap.fitBounds(currentRoutePolyline.getBounds().pad(0.1));
+                    currentRoutePolyline = L.polyline(latLngs, { color: 'red', weight: 5, opacity: 0.8 }).addTo(mapInstance);
+                    mapInstance.fitBounds(currentRoutePolyline.getBounds().pad(0.1));
 
                     const pointerIcon = L.icon({
                         iconUrl: "{% static 'img/navigation_pointer.png' %}",
@@ -369,17 +470,15 @@
 
                     animatedNavigationMarker.on('end', function() {
                         console.log("Navigation animation finished.");
-                        if(currentMap && latLngs.length > 0) { // Ensure map and path still valid
+                        if(mapInstance && latLngs.length > 0) {
                              L.marker(latLngs[latLngs.length - 1], {icon: pointerIcon})
-                                .addTo(currentMap)
+                                .addTo(mapInstance)
                                 .bindPopup(`Arrived at ${data.route.destination.name || 'destination'}`)
                                 .openPopup();
                         }
-                        // Optionally remove the animated marker itself after it ends and is replaced by a static one
-                        if(currentMap && animatedNavigationMarker) currentMap.removeLayer(animatedNavigationMarker);
-
+                        if(mapInstance && animatedNavigationMarker) mapInstance.removeLayer(animatedNavigationMarker);
                     });
-                    currentMap.addLayer(animatedNavigationMarker);
+                    mapInstance.addLayer(animatedNavigationMarker);
 
                     const modal = new bootstrap.Modal(document.getElementById('directionsModal'));
                     const routeDetailsEl = document.getElementById('routeDetails');
