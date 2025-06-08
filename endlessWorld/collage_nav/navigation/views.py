@@ -8,7 +8,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.core.paginator import Paginator
 from django.db.models import Q, F
-from django.contrib.gis.geos import Point
+from django.contrib.gis.geos import Point, Polygon
 from django.contrib.gis.measure import Distance
 from django.contrib.gis.db.models.functions import Distance as DistanceFunction
 from django.utils import timezone
@@ -27,13 +27,37 @@ COICT_CENTER_LAT = -6.771204359255421
 COICT_CENTER_LON = 39.24001333969674
 # Offset in degrees. 0.002 degrees is approx 222 meters.
 # This creates a square boundary.
-COICT_BOUNDS_OFFSET = 0.002
+COICT_BOUNDS_OFFSET = 0.003
 
 STRICT_BOUNDS = [
     [COICT_CENTER_LAT - COICT_BOUNDS_OFFSET, COICT_CENTER_LON - COICT_BOUNDS_OFFSET],  # SW corner
     [COICT_CENTER_LAT + COICT_BOUNDS_OFFSET, COICT_CENTER_LON + COICT_BOUNDS_OFFSET]   # NE corner
 ]
+
+# Create boundary polygon for spatial queries
+COICT_BOUNDARY_POLYGON = Polygon.from_bbox([
+    COICT_CENTER_LON - COICT_BOUNDS_OFFSET,  # min_x (west)
+    COICT_CENTER_LAT - COICT_BOUNDS_OFFSET,  # min_y (south)
+    COICT_CENTER_LON + COICT_BOUNDS_OFFSET,  # max_x (east)
+    COICT_CENTER_LAT + COICT_BOUNDS_OFFSET   # max_y (north)
+])
+COICT_BOUNDARY_POLYGON.srid = 4326
 # --- End Constants ---
+
+def is_within_coict_boundary(point):
+    """Check if a point is within the COICT boundary"""
+    if not point:
+        return False
+    
+    lat, lon = point.y, point.x
+    return (
+        STRICT_BOUNDS[0][0] <= lat <= STRICT_BOUNDS[1][0] and
+        STRICT_BOUNDS[0][1] <= lon <= STRICT_BOUNDS[1][1]
+    )
+
+def filter_locations_by_boundary(locations_queryset):
+    """Filter locations to only include those within COICT boundary"""
+    return locations_queryset.filter(coordinates__within=COICT_BOUNDARY_POLYGON)
 
 def home(request):
     """Home page - redirect to dashboard if authenticated"""
@@ -48,26 +72,23 @@ def register_view(request):
         if form.is_valid():
             user = form.save()
             user.is_verified = True
-            user.save() # Save the updated is_verified status
+            user.save()
 
             # Send welcome SMS
             message = "Thanks for Register our app for navigation to CoICT collage"
             sms_sent = send_sms(user.phone_number, message)
             
             if sms_sent:
-                # Create SMS alert record for welcome message
                 SMSAlert.objects.create(
                     user=user,
                     message=message,
-                    alert_type='welcome', # Changed alert_type
+                    alert_type='welcome',
                     is_sent=True,
                     sent_at=timezone.now()
                 )
                 messages.success(request, 'Registration successful! You can now log in.')
-                return redirect('login') # Redirect to login page
+                return redirect('login')
             else:
-                # If SMS fails, still register the user and redirect to login
-                # but show a message that SMS sending failed.
                 messages.error(request, 'Registration successful, but welcome SMS could not be sent. Please contact admin if this persists.')
                 return redirect('login')
     else:
@@ -100,7 +121,7 @@ def login_view(request):
 
 @login_required
 def logout_view(request):
-    """User logout - THIS WAS MISSING!"""
+    """User logout"""
     user_name = request.user.first_name or request.user.username
     logout(request)
     messages.success(request, f'Goodbye {user_name}! You have been logged out successfully.')
@@ -109,11 +130,6 @@ def logout_view(request):
 def verify_token_view(request, user_id):
     """Verify SMS token"""
     user = get_object_or_404(CustomUser, id=user_id)
-    #TODO: The token_created_at check here might be problematic if user object doesn't have it.
-    # This should be reviewed if password reset verify fails.
-    # if user.token_created_at and timezone.now() > user.token_created_at + timedelta(minutes=settings.PASSWORD_RESET_TIMEOUT_MINUTES):
-    #    messages.error(request, 'Reset code has expired. Please request a new one.')
-    #    return redirect('password_reset_request')
 
     if request.method == 'POST':
         form = TokenVerificationForm(request.POST)
@@ -124,9 +140,6 @@ def verify_token_view(request, user_id):
                 user.is_verified = True
                 user.verification_token = None
                 user.save()
-                
-                # Welcome SMS and alert creation moved to register_view.
-                # This view now only handles token verification.
                 
                 messages.success(request, 'Account verified successfully! You can now log in.')
                 return redirect('login')
@@ -141,7 +154,6 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None, de
     """Generate a restricted campus map using Folium for CoICT-UDSM with strict bounds"""
     
     if defined_bounds is None:
-        # Fallback to global STRICT_BOUNDS if not provided, though it should always be.
         defined_bounds = STRICT_BOUNDS
 
     center_lat = (defined_bounds[0][0] + defined_bounds[1][0]) / 2
@@ -150,21 +162,20 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None, de
     # Create map centered on CoICT with full-screen settings
     campus_map = folium.Map(
         location=[center_lat, center_lon],
-        zoom_start=16,
-        min_zoom=15,
+        zoom_start=17,
+        min_zoom=16,
         max_zoom=20,
         tiles='OpenStreetMap',
         attr='© OpenStreetMap contributors',
         control_scale=True,
-        prefer_canvas=True,  # Better performance for many markers
+        prefer_canvas=True,
     )
     
     # Set map to occupy full container
     campus_map.get_root().width = "100%"
     campus_map.get_root().height = "100%"
 
-    # Explicitly add the primary OpenStreetMap tile layer for roads and general map view
-    # This ensures it's named in the LayerControl.
+    # Add OpenStreetMap tile layer
     folium.TileLayer(
         tiles='OpenStreetMap',
         attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
@@ -173,223 +184,240 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None, de
         control=True
     ).add_to(campus_map)
 
-    # Example: Add an alternative base map layer like CartoDB Positron for a different look
-    # User can switch between these layers using the LayerControl
+    # Add CartoDB Positron as alternative
     folium.TileLayer(
         tiles='CartoDB positron',
         attr='&copy; <a href="https://carto.com/attributions">CARTO</a>',
         name='CartoDB Positron (Light)',
-        overlay=False, # Base layer
+        overlay=False,
         control=True,
-        show=False # Initially not active, user can switch to it
+        show=False
     ).add_to(campus_map)
     
-    # Add strict boundary rectangle using the passed defined_bounds
+    # Add COICT boundary rectangle with enhanced styling
     folium.Rectangle(
         bounds=defined_bounds,
-        color='#1e3a8a',
-        weight=2,
+        color="#0d239c",
+        weight=3,
         fill=True,
-        fill_color='#1e3a8a',
-        fill_opacity=0.1,
-        popup='CoICT Campus Boundary'
+        fill_color="#082983",
+        fill_opacity=0.15,
+        popup='<b>CoICT Campus Boundary</b><br>Only locations within this area are accessible',
+        tooltip='CoICT Campus Area'
     ).add_to(campus_map)
     
     # Add center marker
     folium.Marker(
         location=[center_lat, center_lon],
-        popup='<b>CoICT Center</b><br>University of Dar es Salaam',
+        popup='<b>CoICT Center</b><br>University of Dar es Salaam<br>College of Information and Communication Technologies',
+        tooltip='CoICT Center',
         icon=folium.Icon(color='blue', icon='university', prefix='fa')
     ).add_to(campus_map)
     
     # Add user location if within bounds
-    if user_location:
-        user_lat = user_location.y
-        user_lon = user_location.x
-        
-        # Check if within defined_bounds
-        if (defined_bounds[0][0] <= user_lat <= defined_bounds[1][0] and
-            defined_bounds[0][1] <= user_lon <= defined_bounds[1][1]):
-            
-            folium.Marker(
-                location=[user_lat, user_lon],
-                popup='<b>Your Location</b><br>Within CoICT Campus',
-                icon=folium.Icon(color='red', icon='user', prefix='fa')
-            ).add_to(campus_map)
+    if user_location and is_within_coict_boundary(user_location):
+        folium.Marker(
+            location=[user_location.y, user_location.x],
+            popup='<b>Your Current Location</b><br>Within CoICT Campus',
+            tooltip='You are here',
+            icon=folium.Icon(color='red', icon='user', prefix='fa')
+        ).add_to(campus_map)
     
-    # Add nearby locations only if within defined_bounds
-    # Note: nearby_locations should already be pre-filtered by dashboard_view
+    # Add nearby locations (already filtered)
     if nearby_locations:
-        for location in nearby_locations: # These are already filtered
-            if location.coordinates:
-                lat = location.coordinates.y
-                lon = location.coordinates.x
-                # This check is somewhat redundant if pre-filtering is done correctly,
-                # but kept as a safeguard for map marker placement.
-                if (defined_bounds[0][0] <= lat <= defined_bounds[1][0] and
-                    defined_bounds[0][1] <= lon <= defined_bounds[1][1]):
-                    
-                    folium.Marker(
-                        location=[lat, lon],
-                        popup=f'<b>{location.name}</b><br>{location.get_location_type_display()}',
-                        icon=folium.Icon(color='green', icon='map-marker')
-                    ).add_to(campus_map)
+        for location in nearby_locations:
+            if location.coordinates and is_within_coict_boundary(location.coordinates):
+                folium.Marker(
+                    location=[location.coordinates.y, location.coordinates.x],
+                    popup=f'<b>{location.name}</b><br>{location.get_location_type_display()}<br>{location.description or "No description available"}',
+                    tooltip=location.name,
+                    icon=folium.Icon(color='green', icon='map-marker', prefix='fa')
+                ).add_to(campus_map)
     
-    # Add JavaScript to enforce strict bounds and full-screen behavior
+    # Add boundary enforcement JavaScript
     bounds_js = f"""
-    // Define strict bounds using defined_bounds
+    // Define strict bounds
     var strictBounds = L.latLngBounds(
         L.latLng({defined_bounds[0][0]}, {defined_bounds[0][1]}),
         L.latLng({defined_bounds[1][0]}, {defined_bounds[1][1]})
     );
     
-    // Apply bounds immediately
-    if (typeof window.map_{campus_map._id} !== 'undefined') {{
-        // Make map full screen
-        document.getElementById('{campus_map.get_name()}').style.width = '100%';
-        document.getElementById('{campus_map.get_name()}').style.height = '100%';
-        
-        // Apply strict bounds
-        window.map_{campus_map._id}.setMaxBounds(strictBounds);
-        window.map_{campus_map._id}.options.maxBoundsViscosity = 1.0;
-        
-        // Disable dragging outside bounds
-        window.map_{campus_map._id}.on('drag', function() {{
-            window.map_{campus_map._id}.panInsideBounds(strictBounds, {{animate: false}});
-        }});
-        
-        // Add boundary info
-        var boundaryInfo = L.control({{position: 'topright'}});
-        boundaryInfo.onAdd = function(map) {{
-            var div = L.DomUtil.create('div', 'boundary-info');
-            div.innerHTML = `
-                <div style="background: white; padding: 8px; border-radius: 4px; 
-                            box-shadow: 0 2px 4px rgba(0,0,0,0.2); font-size: 12px;
-                            max-width: 200px;">
-                    <strong>CoICT Campus Boundary</strong>
-                    <div style="margin-top: 4px; color: #666;">
-                        Only locations within this area are shown
+    // Wait for map to be ready
+    setTimeout(function() {{
+        if (typeof window.map_{campus_map._id} !== 'undefined') {{
+            var map = window.map_{campus_map._id};
+            
+            // Make map full screen
+            document.getElementById('{campus_map.get_name()}').style.width = '100%';
+            document.getElementById('{campus_map.get_name()}').style.height = '100%';
+            
+            // Apply strict bounds with high viscosity (prevents dragging outside)
+            map.setMaxBounds(strictBounds);
+            map.options.maxBoundsViscosity = 1.0;
+            
+            // Force map to stay within bounds
+            map.on('drag', function() {{
+                map.panInsideBounds(strictBounds, {{animate: true}});
+            }});
+            
+            // Prevent zooming out too far to see outside boundary
+            map.on('zoomend', function() {{
+                if (map.getZoom() < 16) {{
+                    map.setZoom(16);
+                }}
+            }});
+            
+            // Add boundary warning control
+            var boundaryControl = L.control({{position: 'topright'}});
+            boundaryControl.onAdd = function(map) {{
+                var div = L.DomUtil.create('div', 'boundary-warning');
+                div.innerHTML = `
+                    <div style="background: rgba(220, 38, 38, 0.9); color: white; padding: 10px; 
+                                border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); 
+                                font-size: 12px; max-width: 250px; border: 2px solid #dc2626;">
+                        <div style="font-weight: bold; margin-bottom: 4px;">
+                            🏛️ CoICT Campus Only
+                        </div>
+                        <div style="font-size: 11px; line-height: 1.3;">
+                            Navigation is restricted to CoICT campus area. 
+                            Only locations within the red boundary are accessible.
+                        </div>
                     </div>
-                </div>
-            `;
-            return div;
-        }};
-        boundaryInfo.addTo(window.map_{campus_map._id});
-    }}
+                `;
+                return div;
+            }};
+            boundaryControl.addTo(map);
+            
+            // Fit bounds to campus area
+            map.fitBounds(strictBounds, {{padding: [20, 20]}});
+        }}
+    }}, 500);
     """
     
     campus_map.get_root().html.add_child(folium.Element(f"<script>{bounds_js}</script>"))
     
-    # Add CSS for full-screen behavior
+    # Add enhanced CSS
     map_css = """
     <style>
     .folium-map {
         width: 100% !important;
         height: 100% !important;
-        position: absolute !important;
-        top: 0 !important;
-        left: 0 !important;
-        z-index: 1;
+        position: relative !important;
+        border: 3px solid #dc2626;
+        border-radius: 8px;
+        overflow: hidden;
     }
-    .boundary-info {
+    .boundary-warning {
         z-index: 1000;
+        pointer-events: none;
+    }
+    .leaflet-control-container {
+        z-index: 1001;
     }
     </style>
     """
     campus_map.get_root().html.add_child(folium.Element(map_css))
 
-    # Add Layer Control to the map
+    # Add Layer Control
     folium.LayerControl().add_to(campus_map)
     
-    map_id = campus_map.get_name() # Get the map's generated ID
+    map_id = campus_map.get_name()
     map_html_representation = campus_map._repr_html_()
     return {'html': map_html_representation, 'id': map_id}
 
 @login_required
 def dashboard_view(request):
     """Main dashboard with restricted campus map and recommendations"""
-    # Get nearby locations for recommendations
     user_location = None
-    # nearby_locations will be a list of Location model instances
     nearby_locations_list = []
     recommendations = []
-    
-    # Use the global STRICT_BOUNDS for consistency
     current_strict_bounds = STRICT_BOUNDS
 
-    # Get user's last known location or use default college center
+    # Get user's last known location within COICT boundary
     try:
-        user_location_obj = UserLocation.objects.filter(user=request.user).latest('timestamp')
-        user_location = user_location_obj.location
-        # Ensure SRID is set for existing location
-        if user_location and not user_location.srid:
-            user_location.srid = 4326
+        user_location_objs = UserLocation.objects.filter(user=request.user).order_by('-timestamp')
+        for loc_obj in user_location_objs[:10]:  # Check last 10 locations
+            if loc_obj.location and is_within_coict_boundary(loc_obj.location):
+                user_location = loc_obj.location
+                if not user_location.srid:
+                    user_location.srid = 4326
+                break
     except UserLocation.DoesNotExist:
-        # Default to college center (Dar es Salaam coordinates) with SRID
-        user_location = Point(39.23999216661627, -6.771396137358294, srid=4326)  # Point(longitude, latitude)
+        pass
     
-    if user_location:
-        # Find all locations within a broader radius first (e.g., 5km)
-        potential_nearby_locations = Location.objects.annotate(
-            distance=DistanceFunction('coordinates', user_location)
-        ).filter(
-            coordinates__distance_lte=(user_location, Distance(km=5)) # Broad geographical filter
-        ).order_by('distance')
+    # If no valid user location within boundary, use COICT center
+    if not user_location:
+        user_location = Point(COICT_CENTER_LON, COICT_CENTER_LAT, srid=4326)
+    
+    # Get all locations within COICT boundary only
+    try:
+        # Use spatial query to get only locations within boundary
+        boundary_locations = filter_locations_by_boundary(Location.objects.all())
         
-        # Rigorously filter locations to be within the STRICT_BOUNDS
-        # And ensure they have coordinates
-        filtered_nearby_locations = []
-        for loc in potential_nearby_locations:
-            if loc.coordinates:
-                lat, lon = loc.coordinates.y, loc.coordinates.x
-                if (current_strict_bounds[0][0] <= lat <= current_strict_bounds[1][0] and
-                    current_strict_bounds[0][1] <= lon <= current_strict_bounds[1][1]):
-                    filtered_nearby_locations.append(loc)
-        
-        # Now, nearby_locations_list contains only locations strictly within bounds
-        # Apply slicing after filtering
-        nearby_locations_list = filtered_nearby_locations[:50]
-
-        # Generate smart recommendations based on user preferences and time,
-        # using only the strictly filtered nearby locations for context if needed
+        if user_location:
+            # Order by distance from user location
+            nearby_locations_list = list(boundary_locations.annotate(
+                distance=DistanceFunction('coordinates', user_location)
+            ).order_by('distance')[:50])
+        else:
+            nearby_locations_list = list(boundary_locations[:50])
+            
+        # Generate recommendations from boundary-filtered locations
         current_hour = timezone.now().hour
-        # Pass the QuerySet potential_nearby_locations or the filtered list
-        # depending on how get_smart_recommendations uses it.
-        # For now, assuming it can handle a list of model instances.
         recommendations = get_smart_recommendations(request.user, nearby_locations_list, current_hour)
+        
+    except Exception as e:
+        print(f"Error filtering locations by boundary: {e}")
+        nearby_locations_list = []
+        recommendations = []
     
-    # Get recent searches
-    recent_searches = UserSearch.objects.filter(user=request.user).order_by('-timestamp')[:5]
+    # Get recent searches (only those that found results within boundary)
+    recent_searches = UserSearch.objects.filter(
+        user=request.user,
+        results_count__gt=0
+    ).order_by('-timestamp')[:5]
     
-    # Generate restricted campus map HTML, passing the filtered list and bounds
-    map_data = generate_restricted_campus_map(user_location, nearby_locations_list, defined_bounds=current_strict_bounds)
+    # Generate restricted campus map
+    map_data = generate_restricted_campus_map(
+        user_location, 
+        nearby_locations_list, 
+        defined_bounds=current_strict_bounds
+    )
     
-    # Get user preferences for theme, zoom, etc.
+    # Get user preferences
     user_preferences = get_user_preferences(request.user)
     
     context = {
-        'nearby_locations': nearby_locations_list, # Use the filtered and sliced list
+        'nearby_locations': nearby_locations_list,
         'recommendations': recommendations,
         'recent_searches': recent_searches,
         'map_html': map_data['html'],
-        'map_id': map_data['id'], # Pass map_id to the template
+        'map_id': map_data['id'],
         'user_location': user_location,
         'user_preferences': user_preferences,
-        'total_locations': len(nearby_locations_list), # Count of the filtered list
+        'total_locations': len(nearby_locations_list),
+        'boundary_info': {
+            'center_lat': COICT_CENTER_LAT,
+            'center_lon': COICT_CENTER_LON,
+            'bounds': STRICT_BOUNDS,
+            'area_name': 'CoICT Campus'
+        }
     }
     
     return render(request, 'dashboard.html', context)
 
 @login_required
 def search_locations(request):
-    """Search for locations via AJAX with enhanced functionality"""
+    """Search for locations within COICT boundary only"""
     query = request.GET.get('q', '')
     
     if len(query) < 2:
         return JsonResponse({'locations': []})
     
-    # Enhanced search including fuzzy matching
-    locations = Location.objects.filter(
+    # Search only within COICT boundary
+    boundary_locations = filter_locations_by_boundary(Location.objects.all())
+    
+    locations = boundary_locations.filter(
         Q(name__icontains=query) | 
         Q(description__icontains=query) |
         Q(location_type__icontains=query) |
@@ -418,19 +446,22 @@ def search_locations(request):
             del loc_dict['coordinates']
         locations_list.append(loc_dict)
     
-    return JsonResponse({'locations': locations_list})
+    return JsonResponse({
+        'locations': locations_list,
+        'boundary_restricted': True,
+        'total_found': len(locations_list)
+    })
 
 @login_required
 def get_directions(request):
-    """Get directions between two points with route optimization"""
+    """Get directions between two points within COICT boundary"""
     if request.method == 'POST':
         try:
             data = json.loads(request.body)
             transport_mode = data.get('mode', 'walking')
 
-            from_location_id = data.get('from_id') # Changed from 'from'
-            to_location_id = data.get('to_id')     # Changed from 'to'
-
+            from_location_id = data.get('from_id')
+            to_location_id = data.get('to_id')
             from_lat = data.get('from_latitude')
             from_lon = data.get('from_longitude')
             to_lat = data.get('to_latitude')
@@ -441,29 +472,59 @@ def get_directions(request):
             from_coords_tuple = None
             to_coords_tuple = None
 
-            # Origin
+            # Validate origin location is within boundary
             if from_location_id:
-                from_location_obj = Location.objects.get(location_id=from_location_id)
+                from_location_obj = get_object_or_404(Location, location_id=from_location_id)
+                if not is_within_coict_boundary(from_location_obj.coordinates):
+                    return JsonResponse({
+                        'success': False, 
+                        'error': 'Origin location is outside CoICT campus boundary'
+                    }, status=400)
             elif from_lat is not None and from_lon is not None:
+                from_point = Point(float(from_lon), float(from_lat), srid=4326)
+                if not is_within_coict_boundary(from_point):
+                    return JsonResponse({
+                        'success': False, 
+                        'error': 'Origin coordinates are outside CoICT campus boundary'
+                    }, status=400)
                 from_coords_tuple = (float(from_lat), float(from_lon))
             else:
-                # Try to get user's last known location as a fallback origin
-                last_user_loc = UserLocation.objects.filter(user=request.user).order_by('-timestamp').first()
-                if last_user_loc and last_user_loc.location:
-                    from_coords_tuple = (last_user_loc.location.y, last_user_loc.location.x)
-                    print(f"Using user's last known location as origin: {from_coords_tuple}") # For logging
-                else: # If no ID, no coords, and no last known location
-                    return JsonResponse({'success': False, 'error': 'Origin location or coordinates missing, and no last known location found.'}, status=400)
+                # Try to get user's last known location within boundary
+                last_user_locs = UserLocation.objects.filter(user=request.user).order_by('-timestamp')[:10]
+                for last_loc in last_user_locs:
+                    if last_loc.location and is_within_coict_boundary(last_loc.location):
+                        from_coords_tuple = (last_loc.location.y, last_loc.location.x)
+                        break
+                
+                if not from_coords_tuple:
+                    return JsonResponse({
+                        'success': False, 
+                        'error': 'No valid origin location within CoICT campus boundary'
+                    }, status=400)
 
-
-            # Destination
+            # Validate destination location is within boundary
             if to_location_id:
-                to_location_obj = Location.objects.get(location_id=to_location_id)
+                to_location_obj = get_object_or_404(Location, location_id=to_location_id)
+                if not is_within_coict_boundary(to_location_obj.coordinates):
+                    return JsonResponse({
+                        'success': False, 
+                        'error': 'Destination location is outside CoICT campus boundary'
+                    }, status=400)
             elif to_lat is not None and to_lon is not None:
+                to_point = Point(float(to_lon), float(to_lat), srid=4326)
+                if not is_within_coict_boundary(to_point):
+                    return JsonResponse({
+                        'success': False, 
+                        'error': 'Destination coordinates are outside CoICT campus boundary'
+                    }, status=400)
                 to_coords_tuple = (float(to_lat), float(to_lon))
             else:
-                return JsonResponse({'success': False, 'error': 'Destination location or coordinates missing'}, status=400)
+                return JsonResponse({
+                    'success': False, 
+                    'error': 'Destination location or coordinates missing'
+                }, status=400)
 
+            # Calculate route
             route_data = calculate_route(
                 from_location=from_location_obj,
                 to_location=to_location_obj,
@@ -472,8 +533,12 @@ def get_directions(request):
                 to_coordinates=to_coords_tuple
             )
             
+            # Add boundary validation flag to response
+            route_data['boundary_validated'] = True
+            route_data['campus_area'] = 'CoICT'
+            
             # Analytics and SMS sending logic
-            if from_location_obj and to_location_obj: # Only if both are from existing Location instances
+            if from_location_obj and to_location_obj:
                 RouteRequest.objects.create(
                     user=request.user,
                     from_location=from_location_obj,
@@ -481,29 +546,212 @@ def get_directions(request):
                     transport_mode=transport_mode,
                     timestamp=timezone.now()
                 )
-                if request.user.notifications_enabled and route_data.get('distance', 0) > 2000:
-                    message = f"Route to {to_location_obj.name} is {route_data['distance']:.0f}m. Estimated time: {route_data['duration']} minutes."
+                if request.user.notifications_enabled and route_data.get('distance', 0) > 500:  # Lowered threshold for campus
+                    message = f"Campus route to {to_location_obj.name} is {route_data['distance']:.0f}m. Estimated time: {route_data['duration']} minutes."
                     send_sms(request.user.phone_number, message)
-                    SMSAlert.objects.create(user=request.user, message=message, alert_type='navigation', is_sent=True, sent_at=timezone.now())
-            elif to_location_obj and request.user.notifications_enabled and route_data.get('distance', 0) > 2000 : # SMS if destination is known
-                 message = f"Route to {to_location_obj.name} is {route_data['distance']:.0f}m. Estimated time: {route_data['duration']} minutes."
-                 send_sms(request.user.phone_number, message)
-                 SMSAlert.objects.create(user=request.user, message=message, alert_type='navigation', is_sent=True, sent_at=timezone.now())
-
+                    SMSAlert.objects.create(
+                        user=request.user, 
+                        message=message, 
+                        alert_type='navigation', 
+                        is_sent=True, 
+                        sent_at=timezone.now()
+                    )
 
             return JsonResponse({'success': True, 'route': route_data})
 
         except Location.DoesNotExist:
-            return JsonResponse({'success': False, 'error': 'Location not found'}, status=404)
+            return JsonResponse({'success': False, 'error': 'Location not found within campus boundary'}, status=404)
         except ValueError as ve:
             return JsonResponse({'success': False, 'error': str(ve)}, status=400)
         except Exception as e:
-            # It's good practice to log the actual exception e to your logging system
-            print(f"Unexpected error in get_directions: {e}") # Basic logging
+            print(f"Unexpected error in get_directions: {e}")
             return JsonResponse({'success': False, 'error': 'An unexpected error occurred. Please try again.'}, status=500)
     
     return JsonResponse({'success': False, 'error': 'Invalid request method. Please use POST.'}, status=405)
 
+@login_required
+def update_location(request):
+    """Update user's current location with boundary validation"""
+    if request.method == 'POST':
+        data = json.loads(request.body)
+        latitude = data.get('latitude')
+        longitude = data.get('longitude')
+        accuracy = data.get('accuracy', 0)
+        
+        if latitude and longitude:
+            location = Point(longitude, latitude, srid=4326)
+            
+            # Check if location is within COICT boundary
+            if not is_within_coict_boundary(location):
+                return JsonResponse({
+                    'success': False,
+                    'error': 'Location is outside CoICT campus boundary',
+                    'boundary_violation': True,
+                    'message': 'Your location must be within CoICT campus to use this service'
+                })
+            
+            # Save user location
+            user_location = UserLocation.objects.create(
+                user=request.user,
+                location=location,
+                accuracy=accuracy,
+                timestamp=timezone.now()
+            )
+            
+            # Check geofences for alerts (only within boundary)
+            check_geofences(request.user, location)
+            
+            # Clean up old location records (keep only last 50)
+            old_locations = UserLocation.objects.filter(
+                user=request.user
+            ).order_by('-timestamp')[50:]
+            
+            if old_locations:
+                UserLocation.objects.filter(
+                    id__in=[loc.id for loc in old_locations]
+                ).delete()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Location updated successfully within CoICT campus',
+                'within_boundary': True
+            })
+    
+    return JsonResponse({
+        'success': False,
+        'error': 'Invalid location data'
+    })
+
+def check_geofences(user, location):
+    """Check geofences only within COICT boundary"""
+    # Only check geofences that are within the boundary
+    active_geofences = Geofence.objects.filter(
+        is_active=True,
+        boundary__within=COICT_BOUNDARY_POLYGON
+    )
+    
+    for geofence in active_geofences:
+        is_inside = geofence.boundary.contains(location)
+        
+        last_status = GeofenceEntry.objects.filter(
+            user=user,
+            geofence=geofence
+        ).order_by('-timestamp').first()
+        
+        if is_inside and (not last_status or not last_status.is_inside):
+            if geofence.trigger_type in ['entry', 'both']:
+                message = f"Welcome to {geofence.name} at CoICT! {geofence.description}"
+                
+                if user.notifications_enabled:
+                    send_sms(user.phone_number, message)
+                    SMSAlert.objects.create(
+                        user=user,
+                        message=message,
+                        alert_type='geofence_entry',
+                        is_sent=True,
+                        sent_at=timezone.now()
+                    )
+                
+                GeofenceEntry.objects.create(
+                    user=user,
+                    geofence=geofence,
+                    is_inside=True,
+                    timestamp=timezone.now()
+                )
+                
+        elif not is_inside and last_status and last_status.is_inside:
+            if geofence.trigger_type in ['exit', 'both']:
+                message = f"You have left {geofence.name} at CoICT. Thank you for visiting!"
+                
+                if user.notifications_enabled:
+                    send_sms(user.phone_number, message)
+                    SMSAlert.objects.create(
+                        user=user,
+                        message=message,
+                        alert_type='geofence_exit',
+                        is_sent=True,
+                        sent_at=timezone.now()
+                    )
+                
+                GeofenceEntry.objects.create(
+                    user=user,
+                    geofence=geofence,
+                    is_inside=False,
+                    timestamp=timezone.now()
+                )
+
+@login_required
+def get_last_user_location(request):
+    """Get last user location within boundary"""
+    if request.method == 'GET':
+        try:
+            # Get recent locations and find the first one within boundary
+            recent_locations = UserLocation.objects.filter(user=request.user).order_by('-timestamp')[:10]
+            
+            for location_obj in recent_locations:
+                if location_obj.location and is_within_coict_boundary(location_obj.location):
+                    return JsonResponse({
+                        'success': True,
+                        'latitude': location_obj.location.y,
+                        'longitude': location_obj.location.x,
+                        'timestamp': location_obj.timestamp,
+                        'within_boundary': True
+                    })
+            
+            return JsonResponse({
+                'success': False, 
+                'message': 'No location history found within CoICT campus boundary',
+                'boundary_violation': True
+            })
+            
+        except UserLocation.DoesNotExist:
+            return JsonResponse({
+                'success': False, 
+                'message': 'No location history found for this user'
+            })
+        except Exception as e:
+            print(f"Error in get_last_user_location: {e}")
+            return JsonResponse({
+                'success': False, 
+                'message': 'An error occurred while fetching last location'
+            }, status=500)
+    else:
+        return JsonResponse({
+            'success': False, 
+            'message': 'Invalid request method. Only GET is allowed'
+        }, status=405)
+
+@login_required
+def get_location_details_json(request, location_id):
+    """Return location details only if within boundary"""
+    try:
+        location = get_object_or_404(Location, location_id=location_id)
+        
+        if not location.coordinates:
+            return JsonResponse({'success': False, 'error': 'Location has no coordinates'})
+            
+        if not is_within_coict_boundary(location.coordinates):
+            return JsonResponse({
+                'success': False, 
+                'error': 'Location is outside CoICT campus boundary'
+            })
+            
+        return JsonResponse({
+            'success': True,
+            'name': location.name,
+            'latitude': location.coordinates.y,
+            'longitude': location.coordinates.x,
+            'within_boundary': True,
+            'location_type': location.get_location_type_display(),
+            'description': location.description or 'No description available'
+        })
+        
+    except Location.DoesNotExist:
+        return JsonResponse({'success': False, 'error': 'Location not found'})
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
+# Keep other views unchanged...
 @login_required
 def profile_view(request):
     """User profile management with enhanced features"""
@@ -512,9 +760,8 @@ def profile_view(request):
         if form.is_valid():
             user = form.save()
             
-            # Send profile update confirmation SMS
             if user.notifications_enabled:
-                message = f"Hi {user.first_name}! Your profile has been updated successfully."
+                message = f"Hi {user.first_name}! Your CoICT navigation profile has been updated successfully."
                 send_sms(user.phone_number, message)
                 
                 SMSAlert.objects.create(

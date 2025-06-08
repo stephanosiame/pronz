@@ -44,6 +44,20 @@ admin.site.register(RouteRequest) # Kept for now
 admin.site.register(GeofenceEntry) # Kept for now
 admin.site.register(UserLocation) # Kept for now
 
+<<<<<<< HEAD
+=======
+# Basic registration
+admin.site.register(CustomUser)
+# admin.site.register(Location)
+admin.site.register(NavigationRoute)
+admin.site.register(UserSearch)
+admin.site.register(Geofence)
+admin.site.register(SMSAlert)
+admin.site.register(Recommendation)
+admin.site.register(RouteRequest)
+admin.site.register(GeofenceEntry)
+admin.site.register(UserLocation)  # Added missing model
+>>>>>>> update views
 
 from django.contrib.gis import admin as gis_admin # Use alias to avoid conflict if regular 'admin' is used a lot
 
@@ -65,6 +79,7 @@ COICT_CENTER_LON_ADMIN = 39.24001333969674
 
 # The @gis_admin.register(Location) decorator handles unregistering if Location was previously registered.
 @gis_admin.register(Location)
+
 class LocationAdmin(gis_admin.GISModelAdmin): # Inherit from GISModelAdmin (OSMGeoAdmin is removed in Django 4+)
     list_display = ('name', 'location_type', 'address', 'floor_level', 'is_accessible', 'updated_at')
     search_fields = ('name', 'address', 'description', 'location_type')
