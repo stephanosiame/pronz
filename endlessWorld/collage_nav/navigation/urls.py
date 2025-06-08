@@ -18,4 +18,9 @@ urlpatterns = [
     path('api/update-location/', views.update_location, name='update_location'),
     path('api/location-details/<uuid:location_id>/', views.get_location_details_json, name='get_location_details_json'),
     path('api/get-last-user-location/', views.get_last_user_location, name='get_last_user_location'),
+
+    # Notification API endpoints
+    path('api/notifications/unread_count/', views.get_unread_notification_count, name='get_unread_notification_count'),
+    path('api/notifications/', views.get_notifications_list, name='get_notifications_list'),
+    path('api/notifications/<int:notification_id>/mark_as_read/', views.mark_notification_as_read, name='mark_notification_as_read'),
 ]

@@ -225,3 +225,30 @@ class GeofenceEntry(models.Model):
     def __str__(self):
         status = "entered" if self.is_inside else "exited"
         return f"{self.user.username} {status} {self.geofence.name}"
+
+class AdminNotification(models.Model):
+    title = models.CharField(max_length=100)
+    message = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_published = models.BooleanField(default=False)
+    published_at = models.DateTimeField(null=True, blank=True)
+    # created_by = models.ForeignKey(CustomUser, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_notifications')
+
+    def __str__(self):
+        return self.title
+
+    class Meta:
+        ordering = ['-created_at']
+
+class UserNotificationStatus(models.Model):
+    user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
+    notification = models.ForeignKey(AdminNotification, on_delete=models.CASCADE)
+    is_read = models.BooleanField(default=False)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.user.username} - {self.notification.title} - {'Read' if self.is_read else 'Unread'}"
+
+    class Meta:
+        unique_together = ('user', 'notification') # Ensures a user can only have one status per notification
+        ordering = ['-notification__created_at']
