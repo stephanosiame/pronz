@@ -859,3 +859,67 @@ def get_user_preferences(user):
         'notifications_enabled': getattr(user, 'notifications_enabled', True),
         'location_sharing': getattr(user, 'location_sharing', True),
     }
+
+# --- Notification API Views ---
+
+@login_required
+def get_unread_notification_count(request):
+    # Count published notifications that the user hasn't read
+    published_notifications = AdminNotification.objects.filter(is_published=True)
+
+    unread_count = 0
+    for notification in published_notifications:
+        status, created = UserNotificationStatus.objects.get_or_create(
+            user=request.user,
+            notification=notification
+            # Defaults to is_read=False, which is correct for unread logic
+        )
+        if not status.is_read:
+            unread_count += 1
+
+    return JsonResponse({'unread_count': unread_count})
+
+@login_required
+def get_notifications_list(request):
+    notifications_data = []
+    # Fetch latest 10 published notifications
+    recent_published_notifications = AdminNotification.objects.filter(is_published=True).order_by('-published_at', '-created_at')[:10]
+
+    for notification in recent_published_notifications:
+        status, created = UserNotificationStatus.objects.get_or_create(
+            user=request.user,
+            notification=notification
+        )
+        notifications_data.append({
+            'id': notification.id,
+            'title': notification.title,
+            'message': notification.message,
+            'published_at': notification.published_at.strftime('%Y-%m-%d %H:%M') if notification.published_at else notification.created_at.strftime('%Y-%m-%d %H:%M'),
+            'is_read': status.is_read,
+        })
+    return JsonResponse({'notifications': notifications_data})
+
+@login_required
+@require_http_methods(["POST"]) # Use require_http_methods as it's already imported
+def mark_notification_as_read(request, notification_id):
+    try:
+        # Ensure the notification exists and is published before marking as read
+        notification = AdminNotification.objects.get(id=notification_id, is_published=True)
+
+        status, created = UserNotificationStatus.objects.get_or_create(
+            user=request.user,
+            notification=notification
+        )
+
+        if not status.is_read:
+            status.is_read = True
+            status.read_at = timezone.now()
+            status.save()
+
+        return JsonResponse({'success': True, 'message': 'Notification marked as read.'})
+    except AdminNotification.DoesNotExist:
+        return JsonResponse({'success': False, 'error': 'Notification not found or not published.'}, status=404)
+    except Exception as e:
+        # Log the exception e for server-side debugging
+        # For example: print(f"Error in mark_notification_as_read: {e}")
+        return JsonResponse({'success': False, 'error': 'An internal error occurred.'}, status=500)

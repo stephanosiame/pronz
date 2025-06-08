@@ -9,20 +9,41 @@ from .models import (
     Recommendation, 
     RouteRequest, 
     GeofenceEntry,
-    UserLocation  # This was missing
+    UserLocation,  # This was missing
+    AdminNotification,
+    UserNotificationStatus
 )
+from django.utils import timezone # Needed for admin actions
 
-# Basic registration
-admin.site.register(CustomUser)
-admin.site.register(Location)
-admin.site.register(NavigationRoute)
-admin.site.register(UserSearch)
-admin.site.register(Geofence)
-admin.site.register(SMSAlert)
-admin.site.register(Recommendation)
-admin.site.register(RouteRequest)
-admin.site.register(GeofenceEntry)
-admin.site.register(UserLocation)  # Added missing model
+# Basic registration - We will use @admin.register for new models and can update others gradually
+# admin.site.register(CustomUser) # Example: Keep some basic, or convert all to @admin.register
+# admin.site.register(Location) # Handled by LocationAdmin below
+# admin.site.register(NavigationRoute)
+# admin.site.register(UserSearch)
+# admin.site.register(Geofence)
+# admin.site.register(SMSAlert)
+# admin.site.register(Recommendation)
+# admin.site.register(RouteRequest)
+# admin.site.register(GeofenceEntry)
+# admin.site.register(UserLocation)
+
+# Only models not registered with @admin.register decorator below should be listed here for basic registration.
+# For this task, we are focusing on adding AdminNotification and UserNotificationStatus.
+# Existing basic registrations will be left as is unless they conflict with a new @admin.register.
+# Location is already handled by @gis_admin.register(Location).
+# We will remove basic registrations if we provide a custom admin class for them.
+
+admin.site.register(CustomUser) # Kept for now
+# Location is handled by LocationAdmin
+admin.site.register(NavigationRoute) # Kept for now
+admin.site.register(UserSearch) # Kept for now
+admin.site.register(Geofence) # Kept for now
+admin.site.register(SMSAlert) # Kept for now
+admin.site.register(Recommendation) # Kept for now
+admin.site.register(RouteRequest) # Kept for now
+admin.site.register(GeofenceEntry) # Kept for now
+admin.site.register(UserLocation) # Kept for now
+
 
 from django.contrib.gis import admin as gis_admin # Use alias to avoid conflict if regular 'admin' is used a lot
 
@@ -44,7 +65,7 @@ COICT_CENTER_LON_ADMIN = 39.24001333969674
 
 # The @gis_admin.register(Location) decorator handles unregistering if Location was previously registered.
 @gis_admin.register(Location)
-class LocationAdmin(gis_admin.OSMGeoAdmin): # Inherit from OSMGeoAdmin
+class LocationAdmin(gis_admin.GISModelAdmin): # Inherit from GISModelAdmin (OSMGeoAdmin is removed in Django 4+)
     list_display = ('name', 'location_type', 'address', 'floor_level', 'is_accessible', 'updated_at')
     search_fields = ('name', 'address', 'description', 'location_type')
     list_filter = ('location_type', 'is_accessible', 'floor_level')
@@ -79,3 +100,32 @@ class LocationAdmin(gis_admin.OSMGeoAdmin): # Inherit from OSMGeoAdmin
 #     list_filter = ('timestamp',)
 #     search_fields = ('user__username', 'search_query')
 #     readonly_fields = ('timestamp',)
+
+@admin.register(AdminNotification)
+class AdminNotificationAdmin(admin.ModelAdmin):
+    list_display = ('title', 'is_published', 'published_at', 'created_at')
+    list_filter = ('is_published', 'created_at', 'published_at')
+    search_fields = ('title', 'message')
+    readonly_fields = ('created_at', 'published_at')
+    actions = ['publish_notifications', 'unpublish_notifications']
+
+    def publish_notifications(self, request, queryset):
+        queryset.update(is_published=True, published_at=timezone.now())
+    publish_notifications.short_description = "Publish selected notifications"
+
+    def unpublish_notifications(self, request, queryset):
+        queryset.update(is_published=False, published_at=None) # Also clear published_at
+    unpublish_notifications.short_description = "Unpublish selected notifications"
+
+@admin.register(UserNotificationStatus)
+class UserNotificationStatusAdmin(admin.ModelAdmin):
+    list_display = ('user', 'notification_title', 'is_read', 'read_at')
+    list_filter = ('is_read', 'notification__is_published', 'notification__title') # Filter by notification title
+    search_fields = ('user__username', 'notification__title')
+    readonly_fields = ('read_at',)
+    list_select_related = ('user', 'notification') # Optimize queries
+
+    def notification_title(self, obj):
+        return obj.notification.title
+    notification_title.short_description = 'Notification Title'
+    notification_title.admin_order_field = 'notification__title' # Allow sorting by title
