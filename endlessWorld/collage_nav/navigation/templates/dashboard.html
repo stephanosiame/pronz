@@ -22,6 +22,32 @@
             </div>
         </div>
 
+        <!-- Get Directions Section -->
+        <div class="card mb-4">
+            <div class="card-header bg-success text-white">
+                <h5><i class="fas fa-directions"></i> Get Directions</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label for="startPointInput" class="form-label">Start Point</label>
+                    <input type="text" class="form-control" id="startPointInput" placeholder="Enter start location">
+                    <div id="startPointResults" class="list-group mt-1" style="max-height: 200px; overflow-y: auto;"></div>
+                </div>
+                <div class="mb-3">
+                    <label for="destinationPointInput" class="form-label">Destination Point</label>
+                    <input type="text" class="form-control" id="destinationPointInput" placeholder="Enter destination location">
+                    <div id="destinationPointResults" class="list-group mt-1" style="max-height: 200px; overflow-y: auto;"></div>
+                </div>
+                <div class="form-check mb-3">
+                    <input class="form-check-input" type="checkbox" value="" id="useCurrentLocationCheck">
+                    <label class="form-check-label" for="useCurrentLocationCheck">
+                        Use my current location for Start Point
+                    </label>
+                </div>
+                <button class="btn btn-success w-100" id="getDirectionsButton"><i class="fas fa-route"></i> Get Directions</button>
+            </div>
+        </div>
+
         <!--Recent search suggestions-->
         <div class="card mb-4">
             <div class="card-header bg-primary text-white">
@@ -133,6 +159,19 @@
     let searchResultMarker = null;
     let recommendationMarker = null;
 
+    // Variables for Get Directions
+    let selectedStartLocationId = null;
+    let selectedStartLocationName = '';
+    let selectedEndLocationId = null;
+    let selectedEndLocationName = '';
+
+    // Global Variables for Clicked Coordinates
+    let clickedLat = null;
+    let clickedLng = null;
+    let clickedPointMarker = null;
+    let selectedStartCoords = null;
+    let selectedEndCoords = null;
+
     function initCustomMapLogic(generatedMapId) {
         console.log("initCustomMapLogic called with map ID:", generatedMapId);
 
@@ -163,9 +202,68 @@
             if (!mapInstance) {
                 console.error("CRITICAL: Map instance still not found even after initCustomMapLogic was called and fallbacks attempted.");
                 // alert("Map critical initialization error. Please refresh.");
+            } else {
+                // Add map click listener once mapInstance is confirmed
+                mapInstance.on('click', function(e) {
+                    clickedLat = e.latlng.lat;
+                    clickedLng = e.latlng.lng;
+
+                    if (clickedPointMarker && mapInstance.hasLayer(clickedPointMarker)) {
+                        mapInstance.removeLayer(clickedPointMarker);
+                    }
+
+                    clickedPointMarker = L.marker([clickedLat, clickedLng]).addTo(mapInstance);
+
+                    const popupContent = `
+                        <div>
+                            <strong>Set Location:</strong><br>
+                            Lat: ${clickedLat.toFixed(5)}, Lon: ${clickedLng.toFixed(5)}<br>
+                            <button class='btn btn-sm btn-primary mt-1' onclick='setClickedPointAsStart()'>Set as Start</button>
+                            <button class='btn btn-sm btn-success mt-1 ms-1' onclick='setClickedPointAsDestination()'>Set as Destination</button>
+                        </div>
+                    `;
+                    clickedPointMarker.bindPopup(popupContent).openPopup();
+                });
             }
         }
     }
+
+// Functions to handle setting clicked point as Start or Destination
+function setClickedPointAsStart() {
+    if (clickedLat === null || clickedLng === null) return;
+    selectedStartCoords = { lat: clickedLat, lon: clickedLng };
+    selectedStartLocationId = null; // Clear ID-based selection
+    selectedStartLocationName = '';
+    const startInput = document.getElementById('startPointInput');
+    if (startInput) {
+        startInput.value = `Map Pin: ${clickedLat.toFixed(5)}, ${clickedLng.toFixed(5)}`;
+        startInput.disabled = false; // Ensure it's enabled
+    }
+    const useCurrentCheck = document.getElementById('useCurrentLocationCheck');
+    if (useCurrentCheck) useCurrentCheck.checked = false;
+    const startResults = document.getElementById('startPointResults');
+    if (startResults) startResults.innerHTML = '';
+
+    console.log("Map click set as Start:", selectedStartCoords);
+    if (clickedPointMarker && clickedPointMarker.isPopupOpen()) clickedPointMarker.closePopup();
+    // Optionally, change clickedPointMarker icon or color here if desired
+}
+
+function setClickedPointAsDestination() {
+    if (clickedLat === null || clickedLng === null) return;
+    selectedEndCoords = { lat: clickedLat, lon: clickedLng };
+    selectedEndLocationId = null; // Clear ID-based selection
+    selectedEndLocationName = '';
+    const destInput = document.getElementById('destinationPointInput');
+    if (destInput) destInput.value = `Map Pin: ${clickedLat.toFixed(5)}, ${clickedLng.toFixed(5)}`;
+    const destResults = document.getElementById('destinationPointResults');
+    if (destResults) destResults.innerHTML = '';
+
+    console.log("Map click set as Destination:", selectedEndCoords);
+    if (clickedPointMarker && clickedPointMarker.isPopupOpen()) clickedPointMarker.closePopup();
+    // Optionally, change clickedPointMarker icon or color here if desired
+}
+
 
 document.addEventListener('DOMContentLoaded', function() {
     // DOMContentLoaded is still good for attaching listeners to elements that are part of the static HTML.
@@ -236,6 +334,174 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // Other initializations that depend on the DOM but not necessarily on mapInstance immediately
         // For example, setting up modal events if any, etc.
+
+
+        // --- Start of Get Directions JavaScript (New Block) ---
+
+        const startPointInput = document.getElementById('startPointInput');
+        const startPointResults = document.getElementById('startPointResults');
+        const destinationPointInput = document.getElementById('destinationPointInput');
+        const destinationPointResults = document.getElementById('destinationPointResults');
+        // const getDirectionsButton = document.getElementById('getDirectionsButton'); // Will be used later
+        // const useCurrentLocationCheck = document.getElementById('useCurrentLocationCheck'); // Will be used later
+
+        function displayLocationSuggestions(query, resultsContainer, onSelectCallback) {
+            if (query.length < 2) {
+                resultsContainer.innerHTML = '';
+                return;
+            }
+            fetch(`{% url 'search_locations' %}?q=${encodeURIComponent(query)}`)
+                .then(response => response.json())
+                .then(data => {
+                    resultsContainer.innerHTML = '';
+                    if (data.locations && data.locations.length > 0) {
+                        data.locations.forEach(location => {
+                            const item = document.createElement('a');
+                            item.href = '#';
+                            item.className = 'list-group-item list-group-item-action';
+                            item.textContent = location.name;
+                            item.dataset.locationId = location.location_id;
+                            item.dataset.locationName = location.name;
+                            item.addEventListener('click', (e) => {
+                                e.preventDefault();
+                                onSelectCallback(location.location_id, location.name);
+                                resultsContainer.innerHTML = ''; // Clear results after selection
+                            });
+                            resultsContainer.appendChild(item);
+                        });
+                    } else {
+                        resultsContainer.innerHTML = '<div class="list-group-item disabled">No results found</div>';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching location suggestions:', error);
+                    resultsContainer.innerHTML = '<div class="list-group-item list-group-item-danger">Error loading suggestions</div>';
+                });
+        }
+
+        if (startPointInput) {
+            startPointInput.addEventListener('input', function() {
+                // Disable checkbox if user starts typing in start input
+                const useCurrentCheck = document.getElementById('useCurrentLocationCheck');
+                if (useCurrentCheck && useCurrentCheck.checked) {
+                    // Optionally uncheck or just allow typing to override
+                    // For now, let typing override without unchecking, selection will handle logic
+                }
+                selectedStartLocationId = null; // Reset if user types again
+                selectedStartLocationName = '';
+                selectedStartCoords = null; // Clear map-clicked start coords
+                displayLocationSuggestions(this.value, startPointResults, (locationId, locationName) => {
+                    selectedStartLocationId = locationId;
+                    selectedStartLocationName = locationName;
+                    startPointInput.value = locationName;
+                    console.log("Start Point Selected:", selectedStartLocationName, "(ID:", selectedStartLocationId, ")");
+                    const useCurrentChk = document.getElementById('useCurrentLocationCheck');
+                    if(useCurrentChk) useCurrentChk.checked = false;
+                    startPointInput.disabled = false;
+                });
+            });
+        }
+
+        if (destinationPointInput) {
+            destinationPointInput.addEventListener('input', function() {
+                selectedEndLocationId = null; // Reset if user types again
+                selectedEndLocationName = '';
+                selectedEndCoords = null; // Clear map-clicked end coords
+                displayLocationSuggestions(this.value, destinationPointResults, (locationId, locationName) => {
+                    selectedEndLocationId = locationId;
+                    selectedEndLocationName = locationName;
+                    destinationPointInput.value = locationName;
+                    console.log("Destination Point Selected:", selectedEndLocationName, "(ID:", selectedEndLocationId, ")");
+                });
+            });
+        }
+
+        const useCurrentLocationCheck = document.getElementById('useCurrentLocationCheck');
+        if (useCurrentLocationCheck) {
+            useCurrentLocationCheck.addEventListener('change', function() {
+                if (this.checked) {
+                    startPointInput.disabled = true;
+                    startPointInput.value = "Using current location";
+                    selectedStartLocationId = null;
+                    selectedStartLocationName = "Current Location";
+                    selectedStartCoords = null; // Clear map-clicked start coords
+                    startPointResults.innerHTML = '';
+                } else {
+                    startPointInput.disabled = false;
+                    if (startPointInput.value === "Using current location") {
+                         startPointInput.value = "";
+                    }
+                }
+            });
+        }
+
+        const getDirectionsButton = document.getElementById('getDirectionsButton');
+        if (getDirectionsButton) {
+            getDirectionsButton.addEventListener('click', function() {
+                // Updated Validation
+                const startSelected = selectedStartLocationId || selectedStartCoords || useCurrentLocationCheck.checked;
+                const endSelected = selectedEndLocationId || selectedEndCoords;
+
+                if (!endSelected) {
+                    alert("Please select a destination point (either from search or map click).");
+                    return;
+                }
+                if (!startSelected) {
+                    alert("Please select a start point (from search, map click, or 'Use my current location').");
+                    return;
+                }
+
+                let navigationParams = {};
+
+                // Determine Destination
+                if (selectedEndCoords) {
+                    navigationParams.to_latitude = selectedEndCoords.lat;
+                    navigationParams.to_longitude = selectedEndCoords.lon;
+                    navigationParams.to_name = `Map Pin: ${selectedEndCoords.lat.toFixed(5)}, ${selectedEndCoords.lon.toFixed(5)}`;
+                } else if (selectedEndLocationId) {
+                    navigationParams.to_id = selectedEndLocationId;
+                    navigationParams.to_name = selectedEndLocationName;
+                } else { // Should be caught by validation, but as a safeguard
+                    alert("Destination not properly selected."); return;
+                }
+
+
+                // Determine Start
+                if (useCurrentLocationCheck.checked) {
+                    console.log("Initiating Get Directions using current location for start.");
+                    getOriginForNavigation(function(origin) {
+                        if (origin.type === 'error') {
+                            alert(`Could not determine current location: ${origin.message}`);
+                            return;
+                        }
+                        if (origin.type === 'coords') {
+                            navigationParams.from_latitude = origin.lat;
+                            navigationParams.from_longitude = origin.lon;
+                            navigationParams.from_name = "Current Location";
+                        } else {
+                            navigationParams.from_id = origin.id;
+                            navigationParams.from_name = origin.from;
+                        }
+                        console.log("Navigation params with current location as start:", navigationParams);
+                        fetchAndDisplayRoute(navigationParams);
+                    });
+                } else if (selectedStartCoords) {
+                    navigationParams.from_latitude = selectedStartCoords.lat;
+                    navigationParams.from_longitude = selectedStartCoords.lon;
+                    navigationParams.from_name = `Map Pin: ${selectedStartCoords.lat.toFixed(5)}, ${selectedStartCoords.lon.toFixed(5)}`;
+                    console.log("Initiating Get Directions using map-clicked start point:", navigationParams);
+                    fetchAndDisplayRoute(navigationParams);
+                } else if (selectedStartLocationId) {
+                    navigationParams.from_id = selectedStartLocationId;
+                    navigationParams.from_name = selectedStartLocationName;
+                    console.log("Initiating Get Directions using selected start ID:", navigationParams);
+                    fetchAndDisplayRoute(navigationParams);
+                } else { // Should be caught by validation
+                     alert("Start point not properly selected."); return;
+                }
+            });
+        }
+        // --- End of Get Directions JavaScript (New Block) ---
     });
 
     // Map interaction functions are now global
@@ -409,9 +675,155 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    function fetchAndDisplayRoute(navigationParams) {
+        // This function will be the refactored logic from setAsDestination (first draft)
+        console.log("fetchAndDisplayRoute called with params:", navigationParams);
+        if (!ensureMapInstance()) { // ensureMapInstance should be defined globally
+            alert("Map is not available to display the route.");
+            return;
+        }
+
+        let fetchBody = { to_id: navigationParams.to_id };
+        if (navigationParams.from_id) {
+            fetchBody.from_id = navigationParams.from_id;
+        } else if (navigationParams.from_latitude && navigationParams.from_longitude) {
+            fetchBody.from_latitude = navigationParams.from_latitude;
+            fetchBody.from_longitude = navigationParams.from_longitude;
+        } else {
+            alert("Insufficient start location information for navigation.");
+            console.error("Insufficient start location info in fetchAndDisplayRoute:", navigationParams);
+            return;
+        }
+
+        console.log("Fetching directions with body:", fetchBody);
+
+        fetch("{% url 'get_directions' %}", {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}' },
+            body: JSON.stringify(fetchBody)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                if (currentRoutePolyline) mapInstance.removeLayer(currentRoutePolyline);
+                if (animatedNavigationMarker) mapInstance.removeLayer(animatedNavigationMarker);
+
+                const latLngs = data.route.path.map(coord => L.latLng(coord[0], coord[1]));
+                if (latLngs.length < 2) {
+                    alert("Route path is too short to display."); return;
+                }
+                currentRoutePolyline = L.polyline(latLngs, { color: 'blue', weight: 6, opacity: 0.7 }).addTo(mapInstance);
+                mapInstance.fitBounds(currentRoutePolyline.getBounds().pad(0.1));
+
+                const pointerIcon = L.icon({
+                    iconUrl: "{% static 'img/navigation_pointer.png' %}",
+                    iconSize: [25, 41], iconAnchor: [12, 41]
+                });
+
+                const totalDurationMs = data.route.estimated_time * 60 * 1000;
+                animatedNavigationMarker = L.Marker.movingMarker(latLngs, [totalDurationMs], {
+                    autostart: true, loop: false, icon: pointerIcon
+                });
+
+                animatedNavigationMarker.on('end', function() {
+                    console.log("Navigation animation finished for custom route.");
+                    if(mapInstance && latLngs.length > 0) {
+                         L.marker(latLngs[latLngs.length - 1], {icon: pointerIcon})
+                            .addTo(mapInstance)
+                            .bindPopup(`Arrived at ${data.route.destination.name || navigationParams.to_name || 'destination'}`)
+                            .openPopup();
+                    }
+                    if(mapInstance && animatedNavigationMarker) mapInstance.removeLayer(animatedNavigationMarker);
+                });
+                mapInstance.addLayer(animatedNavigationMarker);
+
+                const modal = new bootstrap.Modal(document.getElementById('directionsModal'));
+                const routeDetailsEl = document.getElementById('routeDetails');
+
+                const fromName = navigationParams.from_name || data.route.source.name;
+                const toName = navigationParams.to_name || data.route.destination.name;
+
+                routeDetailsEl.innerHTML = `
+                    <h6>From: ${fromName}</h6>
+                    <h6>To: ${toName}</h6>
+                    <p>Distance: ${data.route.distance.toFixed(0)} meters</p>
+                    <p>Estimated time: ${data.route.estimated_time} minutes</p>
+                    <hr><h6>Steps:</h6>
+                    <ol>${data.route.steps.map(step => `<li>${step.instruction} (${step.distance.toFixed(0)}m, ${Math.round(step.duration/60)} min)</li>`).join('')}</ol>
+                `;
+                modal.show();
+                document.getElementById('map').scrollIntoView({ behavior: 'smooth' });
+            } else {
+                alert("Error getting directions: " + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(err => {
+            console.error("Error in fetchAndDisplayRoute's fetch call:", err);
+            alert("Could not retrieve new directions. Please check console.");
+        });
+    }
+
     function setAsDestination(destinationId, destLat, destLng) { // mapInstance is global
-        console.log(`Preparing navigation to Destination ID: ${destinationId}`);
-        if (!mapInstance) getMapInstance();
+        console.log(`Preparing navigation to Destination ID: ${destinationId} (from map click)`);
+        if (!ensureMapInstance()) { // ensureMapInstance should be defined globally
+            alert("Map is not available to set destination.");
+            return;
+        }
+        if (mapInstance && typeof mapInstance.closePopup === 'function') {
+            mapInstance.closePopup();
+        }
+
+        // Fetch destination name for display purposes
+        fetch(`/api/location-details/${destinationId}/`)
+            .then(response => response.json())
+            .then(locationData => {
+                const destinationName = locationData.success ? locationData.name : `ID: ${destinationId}`;
+
+                getOriginForNavigation(function(origin) { // Assumes getOriginForNavigation is globally available
+                    if (origin.type === 'error') {
+                        alert(`Could not determine origin for navigation: ${origin.message}`);
+                        return;
+                    }
+
+                    let navigationParams = {
+                        to_id: destinationId,
+                        to_name: destinationName
+                    };
+
+                    if (origin.type === 'coords') {
+                        navigationParams.from_latitude = origin.lat;
+                        navigationParams.from_longitude = origin.lon;
+                        navigationParams.from_name = "Current Location";
+                    } else {
+                        navigationParams.from_id = origin.id;
+                        navigationParams.from_name = origin.from; // e.g. "Default Fallback"
+                    }
+                    fetchAndDisplayRoute(navigationParams); // Call the refactored function
+                });
+            })
+            .catch(err => {
+                console.error("Error fetching destination details for name:", err);
+                // Fallback if name fetch fails
+                getOriginForNavigation(function(origin) {
+                    if (origin.type === 'error') {
+                        alert(`Could not determine origin for navigation: ${origin.message}`);
+                        return;
+                    }
+                    let navigationParams = { to_id: destinationId, to_name: `ID: ${destinationId}` };
+                     if (origin.type === 'coords') {
+                        navigationParams.from_latitude = origin.lat;
+                        navigationParams.from_longitude = origin.lon;
+                        navigationParams.from_name = "Current Location";
+                    } else {
+                        navigationParams.from_id = origin.id;
+                        navigationParams.from_name = origin.from;
+                    }
+                    fetchAndDisplayRoute(navigationParams);
+                });
+            });
+    }
+
+    // Navigation functions
         if (!mapInstance) {
             alert("Map is not available to set destination.");
             return;
