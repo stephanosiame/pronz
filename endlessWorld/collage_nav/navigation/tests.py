@@ -488,6 +488,89 @@ class DirectionsApiTests(TestCase):
         self._post_get_directions(params)
         self.assertEqual(RouteRequest.objects.count(), initial_count)
 
+    @patch('endlessWorld.collage_nav.navigation.utils.calculate_route')
+    def test_get_directions_calculate_route_success(self, mock_calculate_route):
+        # Mock calculate_route to return a predefined success response
+        mock_route_data = {
+            'source': {'name': 'Mock Start', 'coordinates': {'lat': -6.770, 'lng': 39.238}},
+            'destination': {'name': 'Mock End', 'coordinates': {'lat': -6.772, 'lng': 39.240}},
+            'path': [(-6.770, 39.238), (-6.771, 39.239), (-6.772, 39.240)],
+            'distance': 250.5,
+            'estimated_time': 5, # minutes
+            'duration': 300, # seconds
+            'steps': [{'instruction': 'Follow mock path', 'distance': 250.5, 'duration': 300}]
+        }
+        mock_calculate_route.return_value = mock_route_data
+
+        params = {
+            'from_id': str(self.loc_a.location_id), # Using existing loc_a
+            'to_id': str(self.loc_b.location_id)    # Using existing loc_b
+        }
+        response = self._post_get_directions(params)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data['success'])
+        self.assertEqual(data['route'], mock_route_data)
+        mock_calculate_route.assert_called_once()
+        # We can also assert the arguments passed to mock_calculate_route if needed,
+        # e.g., by checking mock_calculate_route.call_args
+
+    @patch('endlessWorld.collage_nav.navigation.utils.calculate_route')
+    def test_get_directions_calculate_route_raises_value_error(self, mock_calculate_route):
+        # Mock calculate_route to raise a ValueError
+        mock_calculate_route.side_effect = ValueError("Test pathfinding error")
+
+        params = {
+            'from_id': str(self.loc_a.location_id),
+            'to_id': str(self.loc_b.location_id)
+        }
+        response = self._post_get_directions(params)
+
+        self.assertEqual(response.status_code, 400) # Based on view's error handling
+        data = response.json()
+        self.assertFalse(data['success'])
+        self.assertEqual(data['error'], "Test pathfinding error")
+        mock_calculate_route.assert_called_once()
+
+    def test_get_directions_invalid_json_body(self):
+        # Send non-JSON data
+        response = self.client.post(reverse('get_directions'), "this is not json", content_type='application/json')
+        self.assertEqual(response.status_code, 400) # Or 500 depending on server's strictness with json.loads
+        data = response.json()
+        self.assertFalse(data['success'])
+        # The error message might vary, e.g. "Invalid JSON data" or "An unexpected error occurred"
+        self.assertIn('error', data)
+        # A more specific error message check might be:
+        # self.assertEqual(data['error'], 'Invalid JSON data: Expecting value: line 1 column 1 (char 0)')
+        # But this can be brittle. The main point is it fails gracefully.
+
+    def test_get_directions_origin_outside_boundary(self):
+        # Create a location explicitly outside COICT bounds
+        loc_outside = create_location(name="Outside Campus Cafe", lat=0.0, lon=0.0)
+        params = {
+            'from_id': str(loc_outside.location_id),
+            'to_id': str(self.loc_b.location_id) # loc_b is inside
+        }
+        response = self._post_get_directions(params)
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertFalse(data['success'])
+        self.assertEqual(data['error'], 'Origin location is outside CoICT campus boundary')
+
+    def test_get_directions_destination_outside_boundary(self):
+        loc_outside = create_location(name="Outside Campus Library", lat=1.0, lon=1.0)
+        params = {
+            'from_id': str(self.loc_a.location_id), # loc_a is inside
+            'to_id': str(loc_outside.location_id)
+        }
+        response = self._post_get_directions(params)
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertFalse(data['success'])
+        self.assertEqual(data['error'], 'Destination location is outside CoICT campus boundary')
+
+
 # --- Token Verification Tests (already started) ---
 class TokenVerificationTests(TestCase):
     def setUp(self):
@@ -610,4 +693,10 @@ class TokenVerificationTests(TestCase):
         })
         user.refresh_from_db()
         self.assertFalse(user.is_verified) # Crucial: user remains unverified
+
+
+# --- Utils Tests ---
+from . import utils # Import the utils module itself for setattr
+from .utils import calculate_route
+import networkx as nx # For NetworkXNoPath exception
 ```
