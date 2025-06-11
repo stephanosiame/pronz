@@ -32,6 +32,26 @@
         opacity: .7;
         z-index: -1; /* Ensure it's behind the main dot if needed, or adjust parent */
     }
+
+    /* Custom Location Marker (Searched) */
+    .custom-location-marker {
+        background-color: #3498db; /* Blue */
+        width: 15px !important;    /* Use !important if Leaflet overrides default L.DivIcon size */
+        height: 15px !important;
+        border-radius: 50%;
+        border: 2px solid white;
+        box-shadow: 0 0 6px rgba(0,0,0,0.6);
+    }
+
+    /* Custom Recommendation Marker */
+    .custom-recommendation-marker {
+        background-color: #9b59b6; /* Purple */
+        width: 15px !important;
+        height: 15px !important;
+        border-radius: 50%;
+        border: 2px solid white;
+        box-shadow: 0 0 6px rgba(0,0,0,0.6);
+    }
 </style>
 
 {% block content %}
@@ -260,6 +280,12 @@
             } else {
                 // Add map click listener once mapInstance is confirmed
                 mapInstance.on('click', function(e) {
+                    // If followMeActive is true, a map click should probably disable it.
+                    if (followMeActive) {
+                        toggleFollowMeMode(); // This will set followMeActive to false and update UI
+                        console.log("Follow Me mode disabled due to map click.");
+                    }
+
                     clickedLat = e.latlng.lat;
                     clickedLng = e.latlng.lng;
 
@@ -294,6 +320,10 @@
                         console.log("Follow Me mode disabled due to manual map pan.");
                     }
                 });
+
+                // Since mapInstance is confirmed here, this is a good place to start GPS watching.
+                console.log("initCustomMapLogic: Map instance confirmed. Calling startWatchingPosition().");
+                startWatchingPosition();
             }
         }
     }
@@ -344,6 +374,13 @@ function handlePositionUpdate(position) {
 
     console.log(`Live Update: Lat: ${currentUserLat}, Lng: ${currentUserLng}, Acc: ${currentUserAccuracy}m, Head: ${currentUserHeading}, Spd: ${currentUserSpeed}`);
     updateUserMarkerOnMap(currentUserLat, currentUserLng, currentUserAccuracy, currentUserHeading);
+
+    // If Follow Me mode is active, pan the map to the new user location
+    if (followMeActive && mapInstance) {
+        mapInstance.panTo([currentUserLat, currentUserLng]);
+        // Optionally, ensure a certain zoom level during follow me
+        // if (mapInstance.getZoom() < 17) mapInstance.setZoom(17);
+    }
 }
 
 function updateUserMarkerOnMap(lat, lng, accuracy, heading) {
@@ -630,32 +667,30 @@ function getClosestPointOnPolyline(polyline, latLng) {
 // --- End Continuous GPS Update Functions ---
 
 document.addEventListener('DOMContentLoaded', function() {
-    // DOMContentLoaded is still good for attaching listeners to elements that are part of the static HTML.
-    // Functions called by onclick attributes need to be global.
-    document.addEventListener('DOMContentLoaded', function() {
-        // Initialize mapInstance if initCustomMapLogic hasn't run yet (e.g. script loading order issue)
-        // This is a fallback, primary initialization is via initCustomMapLogic
-        if (!mapInstance && DYNAMIC_MAP_ID_FROM_DJANGO) {
-            console.log("DOMContentLoaded: mapInstance not yet set by initCustomMapLogic. Attempting to find map:", DYNAMIC_MAP_ID_FROM_DJANGO);
-            if(window[DYNAMIC_MAP_ID_FROM_DJANGO] && typeof window[DYNAMIC_MAP_ID_FROM_DJANGO].getCenter === 'function') {
-                mapInstance = window[DYNAMIC_MAP_ID_FROM_DJANGO];
-                console.log("Map instance set during DOMContentLoaded using DYNAMIC_MAP_ID_FROM_DJANGO.");
-            } else {
-                 // Try legacy map_map as a last resort within DOMContentLoaded
-                if (window.map_map && typeof window.map_map.getCenter === 'function') {
-                    console.warn("Map instance set during DOMContentLoaded using legacy 'window.map_map'.");
-                    mapInstance = window.map_map;
-                } else {
-                    console.warn("Map instance still not found in DOMContentLoaded. Waiting for initCustomMapLogic or direct assignment.");
-                }
+    // Primary initialization of mapInstance and subsequent calls (like startWatchingPosition)
+    // should happen via initCustomMapLogic, which is called by the Folium map's embedded script.
+
+    // Fallback for mapInstance initialization if initCustomMapLogic was somehow missed or delayed,
+    // though this should ideally not be the primary path.
+    if (!mapInstance && DYNAMIC_MAP_ID_FROM_DJANGO) {
+        console.log("DOMContentLoaded: mapInstance not yet set. Attempting to find map via DYNAMIC_MAP_ID_FROM_DJANGO:", DYNAMIC_MAP_ID_FROM_DJANGO);
+        if(window[DYNAMIC_MAP_ID_FROM_DJANGO] && typeof window[DYNAMIC_MAP_ID_FROM_DJANGO].getCenter === 'function') {
+            mapInstance = window[DYNAMIC_MAP_ID_FROM_DJANGO];
+            console.log("Map instance set during DOMContentLoaded using DYNAMIC_MAP_ID_FROM_DJANGO (fallback).");
+            // If mapInstance is found here, and startWatchingPosition hasn't been called yet (e.g. if initCustomMapLogic didn't call it)
+            // This indicates a potential issue with initCustomMapLogic not being called or map not ready then.
+            // For robustness, we could call startWatchingPosition here IF it hasn't been started.
+            if (!isWatchingPosition) { // Check a flag to prevent multiple starts
+                 console.warn("DOMContentLoaded: mapInstance found, but GPS watching not started. Starting now (fallback).");
+                 startWatchingPosition();
             }
+        } else {
+            console.warn("DOMContentLoaded: Map instance still not found using DYNAMIC_MAP_ID_FROM_DJANGO.");
         }
+    }
 
-        // Start watching position once DOM is ready and map instance is potentially available
-        startWatchingPosition();
-
-        // Attach event listener for the Follow Me button
-        const followMeButton = document.getElementById('toggleFollowMe');
+    // Attach event listener for the Follow Me button
+    const followMeButton = document.getElementById('toggleFollowMe');
         if (followMeButton) {
             followMeButton.addEventListener('click', toggleFollowMeMode);
         }
@@ -879,69 +914,27 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Map interaction functions are now global
     // Helper to ensure mapInstance is available for functions called by onclick or programmatically
+    // This function can be simplified if initCustomMapLogic is the sole reliable initializer.
     function ensureMapInstance() {
         if (!mapInstance) {
-            console.warn("ensureMapInstance: mapInstance is not set. Trying to initialize via DYNAMIC_MAP_ID_FROM_DJANGO:", DYNAMIC_MAP_ID_FROM_DJANGO);
+            console.warn("ensureMapInstance: mapInstance is not set. Attempting to retrieve it via DYNAMIC_MAP_ID_FROM_DJANGO:", DYNAMIC_MAP_ID_FROM_DJANGO);
             if (window[DYNAMIC_MAP_ID_FROM_DJANGO] && typeof window[DYNAMIC_MAP_ID_FROM_DJANGO].getCenter === 'function') {
                  mapInstance = window[DYNAMIC_MAP_ID_FROM_DJANGO];
                  console.log("ensureMapInstance: mapInstance acquired using DYNAMIC_MAP_ID_FROM_DJANGO.");
-            } else if (window.map_map && typeof window.map_map.getCenter === 'function') { // Last resort fallback
-                mapInstance = window.map_map;
-                console.warn("ensureMapInstance: mapInstance acquired using legacy 'window.map_map'.");
             } else {
                  console.error("ensureMapInstance: Could not acquire mapInstance. Map interactions will likely fail.");
-                 // alert("Map is not fully initialized. Please wait a moment or refresh."); // Avoid alert here, let calling function handle
-                 return null; // Indicate failure
+                 return null;
             }
         }
         return mapInstance;
     }
 
     // Search functionality (event listener setup in DOMContentLoaded)
-    // function setupSearchListeners() { ... } // This part is now inside DOMContentLoaded
 
     // Show location on map
-        const query = this.value.trim();
-        if (query.length >= 2) {
-            fetch(`{% url 'search_locations' %}?q=${query}`)
-                .then(response => response.json())
-                .then(data => {
-                    const resultsContainer = document.getElementById('searchResults');
-                    resultsContainer.innerHTML = '';
-                    
-                    if (data.locations.length > 0) {
-                        data.locations.forEach(location => {
-                            const item = document.createElement('a');
-                            item.href = '#';
-                            item.className = 'list-group-item list-group-item-action';
-                            item.innerHTML = `
-                                <h6>${location.name}</h6>
-                                <small class="text-muted">${location.location_type}</small>
-                                <p class="mb-1">${location.description || ''}</p>
-                            `;
-                            item.addEventListener('click', (e) => {
-                                e.preventDefault();
-                                showLocation(location.location_id);
-                            });
-                            resultsContainer.appendChild(item);
-                        });
-                    } else {
-                        resultsContainer.innerHTML = '<div class="list-group-item">No results found</div>';
-                    }
-                });
-        }
-    });
-    
-    // Prevent form submission
-    document.getElementById('searchForm').addEventListener('submit', function(e) {
-        e.preventDefault();
-    });
-    
-    // Show location on map
-    function showLocation(locationId) { // mapInstance is now a global variable within DOMContentLoaded
+    function showLocation(locationId) {
         console.log("Attempting to show searched location on map for Location ID:", locationId);
-        if (!mapInstance) getMapInstance(); // Try to initialize if not already
-        if (!mapInstance) {
+        if (!ensureMapInstance()) { // Use the helper to get/confirm mapInstance
             alert("Map is not available to display location.");
             return;
         }
@@ -969,11 +962,17 @@ document.addEventListener('DOMContentLoaded', function() {
                         </button>
                     `;
 
-                    searchResultMarker = L.marker([lat, lon]).addTo(mapInstance)
+                    searchResultMarker = L.marker([lat, lon], {
+                        icon: L.divIcon({
+                            className: 'custom-location-marker', // Your custom CSS class
+                            iconSize: [15, 15], // Size of the icon
+                            iconAnchor: [7, 7]  // Anchor point (center)
+                        })
+                    }).addTo(mapInstance)
                         .bindPopup(popupContent)
                         .openPopup();
 
-                    console.log("Map panned and zoomed. Marker with navigation button added.");
+                    console.log("Map panned and zoomed. Custom location marker added.");
                     document.getElementById('map').scrollIntoView({ behavior: 'smooth' });
                 } else {
                     console.error("Failed to fetch location details for search:", locationData.error);
@@ -1420,17 +1419,16 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
 
                     window.recommendationMarker = L.marker([lat, lon], {
-                        icon: L.icon({ // Example of a custom icon
-                            iconUrl: '{% static "img/custom_marker_favicon.png" %}', // Replace with your marker icon if you have one
-                            iconSize: [32, 32],
-                            iconAnchor: [16, 32],
-                            popupAnchor: [0, -32]
+                        icon: L.divIcon({
+                            className: 'custom-recommendation-marker', // Your custom CSS class
+                            iconSize: [15, 15], // Size of the icon
+                            iconAnchor: [7, 7]  // Anchor point (center)
                         })
                     }).addTo(mapInstance)
                         .bindPopup(`<b>${data.name}</b><br><img src="${mediaUrl}" alt="${data.name}" style="width:100px;height:auto;">`)
                         .openPopup();
 
-                    console.log("Map panned and zoomed. Marker added.");
+                    console.log("Map panned and zoomed. Custom recommendation marker added.");
                     // Scroll to the map if it's not fully visible
                     document.getElementById('map').scrollIntoView({ behavior: 'smooth' });
 

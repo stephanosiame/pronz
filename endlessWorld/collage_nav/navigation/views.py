@@ -227,11 +227,32 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None, de
     if nearby_locations:
         for location in nearby_locations:
             if location.coordinates and is_within_coict_boundary(location.coordinates):
+                # Custom DivIcon marker
+                div_icon_html = """
+                <div style="
+                    width: 15px;
+                    height: 15px;
+                    border-radius: 50%;
+                    background-color: #2ecc71;
+                    border: 2px solid white;
+                    box-shadow: 0 0 5px rgba(0,0,0,0.5);
+                    text-align: center;
+                    line-height: 15px; /* Vertically center if adding text/icon */
+                    font-size: 10px; /* Example if adding text/icon */
+                    color: white; /* Example if adding text/icon */
+                ">
+                </div>
+                """
                 folium.Marker(
                     location=[location.coordinates.y, location.coordinates.x],
                     popup=f'<b>{location.name}</b><br>{location.get_location_type_display()}<br>{location.description or "No description available"}',
                     tooltip=location.name,
-                    icon=folium.Icon(color='green', icon='map-marker', prefix='fa')
+                    icon=folium.features.DivIcon(
+                        icon_size=(15, 15), # Set to match your div's size
+                        icon_anchor=(7, 7), # Anchor point (half of size)
+                        html=div_icon_html,
+                        popup_anchor=(0, -10) # Adjust popup anchor if needed
+                    )
                 ).add_to(campus_map)
     
     # Add boundary enforcement JavaScript
