@@ -1,12 +1,12 @@
 from django.test import TestCase, Client
 from django.urls import reverse
-from django.contrib.gis.geos import Point
+from django.contrib.gis.geos import Point, Polygon, LineString # Added Polygon, LineString
 from django.utils import timezone
 import uuid
 import json
 from unittest.mock import patch, call
 
-from .models import CustomUser, Location, Recommendation, UserLocation, RouteRequest, SMSAlert # Added RouteRequest and SMSAlert
+from .models import CustomUser, Location, Recommendation, UserLocation, RouteRequest, SMSAlert, Geofence, NavigationRoute # Added Geofence, NavigationRoute
 from .forms import CustomUserRegistrationForm, TokenVerificationForm, PasswordResetRequestForm
 from .views import COICT_CENTER_LAT, COICT_CENTER_LON, COICT_BOUNDS_OFFSET, STRICT_BOUNDS, get_smart_recommendations
 
@@ -333,6 +333,34 @@ class SearchToMapTests(TestCase):
         self.assertTrue(len(data['locations']) >= 1) # Could match type or name
         self.assertTrue(any(loc['name'] == self.search_loc3.name for loc in data['locations']))
 
+    def test_search_locations_case_insensitivity(self):
+        create_location(name="Main Library", location_type='library')
+        create_location(name="main library extension", location_type='library')
+        create_location(name="MAIN LIBRARY Reading Room", location_type='library')
+
+        # Search with all lowercase
+        response = self.client.get(reverse('search_locations'), {'q': 'main library'})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        # The original self.search_loc3 ("Library Gamma") might also be found if "library" is in its name/desc/type.
+        # We expect at least the 3 newly created ones.
+        # Let's count how many of the new ones are present vs total.
+        found_count = 0
+        for loc in data['locations']:
+            if "MAIN LIBRARY" in loc['name'].upper() or "MAIN LIBRARY EXTENSION" in loc['name'].upper():
+                found_count +=1
+        self.assertEqual(found_count, 3, "Should find all 3 variations of 'Main Library'")
+
+
+        # Search with mixed case
+        response = self.client.get(reverse('search_locations'), {'q': 'Main Library'})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        found_count_mixed = 0
+        for loc in data['locations']:
+            if "MAIN LIBRARY" in loc['name'].upper() or "MAIN LIBRARY EXTENSION" in loc['name'].upper():
+                found_count_mixed +=1
+        self.assertEqual(found_count_mixed, 3, "Should find all 3 variations of 'Main Library' with mixed case query")
 
     def test_search_locations_view_no_results(self):
         response = self.client.get(reverse('search_locations'), {'q': 'NonExistentXYZ'})
@@ -699,4 +727,99 @@ class TokenVerificationTests(TestCase):
 from . import utils # Import the utils module itself for setattr
 from .utils import calculate_route
 import networkx as nx # For NetworkXNoPath exception
+
+
+# --- Geofence Model Tests ---
+class GeofenceModelTests(TestCase):
+    def setUp(self):
+        self.user = create_user(username="geofence_creator", phone_number="+255712345678")
+        self.location = create_location(name="Geofence Location Center")
+        self.sample_polygon = Polygon(((0, 0), (0, 1), (1, 1), (1, 0), (0, 0))) # Simple square
+
+    def test_create_geofence(self):
+        geofence = Geofence.objects.create(
+            name="Test Geofence",
+            description="A test geofence area",
+            location=self.location,
+            boundary=self.sample_polygon,
+            created_by=self.user,
+            is_active=True
+        )
+        self.assertEqual(Geofence.objects.count(), 1)
+        self.assertEqual(geofence.name, "Test Geofence")
+        self.assertTrue(geofence.boundary.equals_exact(self.sample_polygon, tolerance=0.00001))
+        self.assertTrue(geofence.is_active)
+
+    def test_create_navigation_route(self):
+        loc_start = create_location(name="Start Point Nav", lat=-6.770, lon=39.230)
+        loc_end = create_location(name="End Point Nav", lat=-6.772, lon=39.232)
+        sample_path = LineString(((39.230, -6.770), (39.231, -6.771), (39.232, -6.772)), srid=4326)
+
+        route = NavigationRoute.objects.create(
+            source_location=loc_start,
+            destination_location=loc_end,
+            route_path=sample_path,
+            distance=150.5,
+            estimated_time=3
+        )
+        self.assertEqual(NavigationRoute.objects.count(), 1)
+        self.assertEqual(route.distance, 150.5)
+        self.assertTrue(route.route_path.equals_exact(sample_path, tolerance=0.00001))
+
+
+# --- Geofence API Tests ---
+class GeofenceApiTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = create_user(username="api_user_gf", phone_number="+255787654321")
+        self.client.login(username="api_user_gf", password="password123")
+        self.location = create_location(name="Campus Hotspot")
+
+        # Define some polygons for geofences
+        self.poly1 = Polygon(((39.230, -6.770), (39.230, -6.775), (39.235, -6.775), (39.235, -6.770), (39.230, -6.770)), srid=4326)
+        self.poly2 = Polygon(((39.240, -6.780), (39.240, -6.785), (39.245, -6.785), (39.245, -6.780), (39.240, -6.780)), srid=4326)
+
+        self.gf1 = Geofence.objects.create(
+            name="Library Geofence", location=self.location, boundary=self.poly1,
+            created_by=self.user, is_active=True, description="Quiet zone"
+        )
+        self.gf2 = Geofence.objects.create(
+            name="Cafeteria Geofence", location=self.location, boundary=self.poly2,
+            created_by=self.user, is_active=True, description="Lunch area"
+        )
+        self.gf_inactive = Geofence.objects.create(
+            name="Old Geofence", location=self.location, boundary=self.poly1,
+            created_by=self.user, is_active=False # Inactive
+        )
+
+    def test_api_get_geofences_success(self):
+        response = self.client.get(reverse('api_get_geofences'))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertIn('geofences', data)
+        self.assertEqual(len(data['geofences']), 2) # Only active geofences
+
+        gf1_data = next((item for item in data['geofences'] if item['name'] == self.gf1.name), None)
+        gf2_data = next((item for item in data['geofences'] if item['name'] == self.gf2.name), None)
+
+        self.assertIsNotNone(gf1_data)
+        self.assertIsNotNone(gf2_data)
+
+        self.assertEqual(gf1_data['description'], self.gf1.description)
+        self.assertIn('coordinates', gf1_data['boundary_geojson']) # Check for GeoJSON structure
+        self.assertEqual(gf1_data['boundary_geojson']['type'], 'Polygon')
+
+    def test_api_get_geofences_no_active_geofences(self):
+        Geofence.objects.filter(is_active=True).update(is_active=False) # Deactivate all
+        response = self.client.get(reverse('api_get_geofences'))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data['geofences']), 0)
+
+    def test_api_get_geofences_requires_login(self):
+        self.client.logout()
+        response = self.client.get(reverse('api_get_geofences'))
+        self.assertEqual(response.status_code, 302) # Redirects to login
+        self.assertTrue(reverse('login') in response.url)
 ```
