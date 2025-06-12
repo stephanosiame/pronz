@@ -45,6 +45,7 @@ admin.site.register(GeofenceEntry) # Kept for now
 admin.site.register(UserLocation) # Kept for now
 
 
+
 # # Basic registration
 # admin.site.register(CustomUser)
 # # admin.site.register(Location)
@@ -56,6 +57,7 @@ admin.site.register(UserLocation) # Kept for now
 # admin.site.register(RouteRequest)
 # admin.site.register(GeofenceEntry)
 # admin.site.register(UserLocation)  # Added missing model
+
 
 
 from django.contrib.gis import admin as gis_admin # Use alias to avoid conflict if regular 'admin' is used a lot

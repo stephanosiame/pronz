@@ -1,5 +1,6 @@
 import os
 import logging # Added
+from shapely.wkt import loads as load_wkt # Added
 import osmnx as ox
 import networkx as nx
 from requests.exceptions import RequestException # Added for network errors
@@ -60,8 +61,11 @@ def load_coict_graph():
 
     logger.info("Downloading CoICT campus graph data from OpenStreetMap as it's not cached or cache is invalid.")
     try:
+        # Convert Django GEOS Polygon to Shapely Polygon
+        shapely_polygon = load_wkt(COICT_BOUNDARY_POLYGON.wkt)
+
         graph = ox.graph_from_polygon(
-            COICT_BOUNDARY_POLYGON,
+            shapely_polygon, # Use the converted shapely polygon
             network_type='walk',
             simplify=True,
             retain_all=True,
