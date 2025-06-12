@@ -14,6 +14,7 @@ from django.contrib.gis.db.models.functions import Distance as DistanceFunction
 from django.utils import timezone
 from datetime import datetime, timedelta
 import json
+from django.core.serializers import serialize
 import random
 import string
 import folium
@@ -1191,3 +1192,18 @@ def mark_notification_as_read(request, notification_id):
         # Log the exception e for server-side debugging
         # For example: print(f"Error in mark_notification_as_read: {e}")
         return JsonResponse({'success': False, 'error': 'An internal error occurred.'}, status=500)
+
+@login_required
+def api_get_geofences(request):
+    active_geofences = Geofence.objects.filter(is_active=True)
+    # Serialize the boundary to GeoJSON directly if possible, or prepare a list of dicts
+    geofences_data = []
+    for gf in active_geofences:
+        if gf.boundary: # Ensure boundary exists
+            geofences_data.append({
+                'id': gf.geofence_id,
+                'name': gf.name,
+                'description': gf.description,
+                'boundary_geojson': json.loads(gf.boundary.geojson) # Get GeoJSON directly
+            })
+    return JsonResponse({'geofences': geofences_data})

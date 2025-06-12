@@ -1,334 +1,134 @@
-{% extends 'base.html' %}
-{% load static %}
+// Global variable to hold the map instance, to be set by initCustomMapLogic
+// var mapInstance = null; // This will be set by the script in dashboard.html initially
+// const DYNAMIC_MAP_ID_FROM_DJANGO = "{{ map_id|escapejs }}"; // Now a global JS var
+// console.log("Django template DYNAMIC_MAP_ID_FROM_DJANGO:", DYNAMIC_MAP_ID_FROM_DJANGO); // Will use global
 
-{% block title %}Dashboard{% endblock %}
+// These variables will be used by functions now made global, so define them in a scope accessible to them.
+let currentRoutePolyline = null;
+let animatedNavigationMarker = null;
+let searchResultMarker = null;
+let recommendationMarker = null;
 
-<style>
-    @keyframes pulsate {
-        0% { transform: scale(0.1); opacity: 0.0; }
-        50% { opacity: 1; }
-        100% { transform: scale(1.2); opacity: 0.0; }
-    }
-    .live-position-marker {
-        background-color: #007bff;
-        width: 18px;
-        height: 18px;
-        border-radius: 50%;
-        border: 2px solid white;
-        box-shadow: 0 0 7px #007bff, 0 0 10px #007bff;
-        position: relative; /* Needed for the ::after pseudo-element */
-    }
-    .live-position-marker::after {
-        content: '';
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        width: 18px; /* Match parent */
-        height: 18px; /* Match parent */
-        transform: translate(-50%, -50%); /* Center the pseudo-element */
-        border-radius: 50%;
-        background-color: #007bff;
-        animation: pulsate 1.8s ease-out infinite;
-        opacity: .7;
-        z-index: -1; /* Ensure it's behind the main dot if needed, or adjust parent */
-    }
+// Variables for Get Directions
+let selectedStartLocationId = null;
+let selectedStartLocationName = '';
+let selectedEndLocationId = null;
+let selectedEndLocationName = '';
 
-    /* Custom Location Marker (Searched) */
-    .custom-location-marker {
-        background-color: #3498db; /* Blue */
-        width: 15px !important;    /* Use !important if Leaflet overrides default L.DivIcon size */
-        height: 15px !important;
-        border-radius: 50%;
-        border: 2px solid white;
-        box-shadow: 0 0 6px rgba(0,0,0,0.6);
-    }
+// Global Variables for Clicked Coordinates
+let clickedLat = null;
+let clickedLng = null;
+let clickedPointMarker = null;
+let selectedStartCoords = null;
+let selectedEndCoords = null;
 
-    /* Custom Recommendation Marker */
-    .custom-recommendation-marker {
-        background-color: #9b59b6; /* Purple */
-        width: 15px !important;
-        height: 15px !important;
-        border-radius: 50%;
-        border: 2px solid white;
-        box-shadow: 0 0 6px rgba(0,0,0,0.6);
-    }
-</style>
+// Global Variables for Continuous GPS Updates
+let currentPositionWatcherId = null;
+let currentUserLat = null;
+let currentUserLng = null;
+let currentUserAccuracy = null;
+let currentUserHeading = null;
+let currentUserSpeed = null;
+let isWatchingPosition = false;
 
-{% block content %}
-<div class="row">
-    <div class="col-md-4">
-        <div class="card mb-4">
-            <div class="card-header bg-primary text-white">
-                <h5><i class="fas fa-search"></i> Search Locations</h5>
-            </div>
-            <div class="card-body">
-                <form id="searchForm">
-                    <div class="input-group mb-3">
-                        <input type="text" class="form-control" placeholder="Search for locations..." id="searchInput">
-                        <button class="btn btn-primary" type="submit"><i class="fas fa-search"></i></button>
-                    </div>
-                </form>
-                
-                <div id="searchResults" class="list-group" style="max-height: 300px; overflow-y: auto;"></div>
-            </div>
-        </div>
+// For displaying live position on map
+let userLivePositionMarker = null;
+let userAccuracyCircle = null;
+let followMeActive = false;
 
-        <!-- Get Directions Section -->
-        <div class="card mb-4">
-            <div class="card-header bg-success text-white">
-                <h5><i class="fas fa-directions"></i> Get Directions</h5>
-            </div>
-            <div class="card-body">
-                <div class="mb-3">
-                    <label for="startPointInput" class="form-label">Start Point</label>
-                    <input type="text" class="form-control" id="startPointInput" placeholder="Enter start location">
-                    <div id="startPointResults" class="list-group mt-1" style="max-height: 200px; overflow-y: auto;"></div>
-                </div>
-                <div class="mb-3">
-                    <label for="destinationPointInput" class="form-label">Destination Point</label>
-                    <input type="text" class="form-control" id="destinationPointInput" placeholder="Enter destination location">
-                    <div id="destinationPointResults" class="list-group mt-1" style="max-height: 200px; overflow-y: auto;"></div>
-                </div>
-                <div class="form-check mb-3">
-                    <input class="form-check-input" type="checkbox" value="" id="useCurrentLocationCheck">
-                    <label class="form-check-label" for="useCurrentLocationCheck">
-                        Use my current location for Start Point
-                    </label>
-                </div>
-                <button class="btn btn-success w-100" id="getDirectionsButton"><i class="fas fa-route"></i> Get Directions</button>
-            </div>
-        </div>
+// For Off-Route Notification
+const OFF_ROUTE_THRESHOLD_METERS = 25; // Approx 25 meters
+const VISUAL_SNAP_THRESHOLD_METERS = 15; // User marker visually snaps if within this distance
+let isCurrentlyNotifyingOffRoute = false;
+let originalDestination = null; // Stores details of the original destination for recalculation
 
-        <!--Recent search suggestions-->
-        <div class="card mb-4">
-            <div class="card-header bg-primary text-white">
-                <h5><i class="fas fa-clock"></i> Recent Searches</h5>
-            </div>
-            <div class="card-body">
-                {% if recent_searches %}
-                <ul class="list-group">
-                    {% for search in recent_searches %}
-                    <li class="list-group-item d-flex justify-content-between align-items-center">
-                        {{ search.search_query }}
-                        <span class="badge bg-secondary">{{ search.timestamp|timesince }} ago</span>
-                    </li>
-                    {% endfor %}
-                </ul>
-                {% else %}
-                <p class="text-muted">No recent searches</p>
-                {% endif %}
-            </div>
-        </div>
-        
-        <!--Show Recommmendations-->
-        <div class="card mb-4">
-            <div class="card-header bg-primary text-white">
-                <h5><i class="fas fa-lightbulb"></i> Recommendations</h5>
-            </div>
-            <div class="card-body">
-                {% if recommendations %}
-                <div class="list-group">
-                    {% for rec in recommendations %}
-                    <div class="list-group-item list-group-item-action">
-                        <div class="d-flex w-100 justify-content-between">
-                            <h6 class="mb-1">{{ rec.recommended_location.name }}</h6>
-                            <small>{{ rec.reason }}</small>
-                        </div>
-                        <p class="mb-1">{{ rec.recommended_location.description|truncatechars:50 }}</p>
-                        <small>{{ rec.recommended_location.get_location_type_display }}</small>
-                        {% if rec.media_url %}
-                        <div class="mt-2">
-                            <a href="#" onclick="showRecommendationOnMap('{{ rec.recommended_location.location_id }}', '{{ rec.media_url }}')">
-                                <img src="{{ rec.media_url }}" alt="{{ rec.recommended_location.name }} media" class="img-fluid rounded" style="max-height: 150px;">
-                            </a>
-                        </div>
-                        {% endif %}
-                    </div>
-                    {% endfor %}
-                </div>
-                {% else %}
-                <p class="text-muted">No recommendations available</p>
-                {% endif %}
-            </div>
-        </div>
-    </div>
-    
-    <div class="col-md-8">
-        <div class="card">
-            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-                <h5><i class="fas fa-map"></i> Campus Map</h5>
-                <div>
-                    <button class="btn btn-sm btn-light me-2" onclick="locateMe()">
-                        <i class="fas fa-location-arrow"></i> Locate Me
-                    </button>
-                    <button id="toggleFollowMe" class="btn btn-sm btn-secondary ms-2">Follow Me: Off</button>
-                    <div class="btn-group btn-group-sm ms-2">
-                        <button class="btn btn-light" onclick="zoomIn()"><i class="fas fa-plus"></i></button>
-                        <button class="btn btn-light" onclick="zoomOut()"><i class="fas fa-minus"></i></button>
-                    </div>
-                </div>
-            </div>
-            <div class="card-body p-0" style="height: 600px; position: relative;"> <!-- Added position:relative for absolute child positioning -->
-                <div id="offRouteNotification" style="display:none; position:absolute; top:10px; left:50%; transform:translateX(-50%); z-index:1001; background:rgba(255, 223, 0, 0.92); color: #333; padding:10px 18px; border-radius:8px; box-shadow:0 3px 8px rgba(0,0,0,0.35); font-size:0.95em; text-align:center; border: 1px solid #cca700;">
-                    <!-- Message will be set by JavaScript -->
-                </div>
-                <div id="map" style="height: 100%; width: 100%;">
-                    {{ map_html|safe }}
-                    <!-- The map_html now includes a script tag that calls initCustomMapLogic -->
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
+function initCustomMapLogic(generatedMapId) {
+    console.log("initCustomMapLogic called with map ID:", generatedMapId);
 
-<div class="modal fade" id="directionsModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Directions</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-                <div id="routeDetails"></div>
-                <div id="routeMap" style="height: 400px; width: 100%;"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-            </div>
-        </div>
-    </div>
-</div>
-{% endblock %}
+    // Use the global mapInstance from dashboard.html
+    if (window[generatedMapId] && typeof window[generatedMapId].getCenter === 'function') {
+        console.log("SUCCESS: Folium map instance found in initCustomMapLogic using ID:", generatedMapId);
+        mapInstance = window[generatedMapId]; // Set the global mapInstance
 
-{% block scripts %}
-<script src="https://unpkg.com/leaflet.movingmarker@0.3.0/dist/leaflet.movingmarker.min.js"></script>
-<script>
-    // Global variable to hold the map instance, to be set by initCustomMapLogic
-    var mapInstance = null;
-    const DYNAMIC_MAP_ID_FROM_DJANGO = "{{ map_id|escapejs }}";
-    console.log("Django template DYNAMIC_MAP_ID_FROM_DJANGO:", DYNAMIC_MAP_ID_FROM_DJANGO);
+        // For testing, let's try a simple map action here:
+        if (mapInstance.getCenter) {
+            console.log("Map center from initCustomMapLogic:", mapInstance.getCenter());
+        }
 
-    // These variables will be used by functions now made global, so define them in a scope accessible to them.
-    let currentRoutePolyline = null;
-    let animatedNavigationMarker = null;
-    let searchResultMarker = null;
-    let recommendationMarker = null;
-
-    // Variables for Get Directions
-    let selectedStartLocationId = null;
-    let selectedStartLocationName = '';
-    let selectedEndLocationId = null;
-    let selectedEndLocationName = '';
-
-    // Global Variables for Clicked Coordinates
-    let clickedLat = null;
-    let clickedLng = null;
-    let clickedPointMarker = null;
-    let selectedStartCoords = null;
-    let selectedEndCoords = null;
-
-    // Global Variables for Continuous GPS Updates
-    let currentPositionWatcherId = null;
-    let currentUserLat = null;
-    let currentUserLng = null;
-    let currentUserAccuracy = null;
-    let currentUserHeading = null;
-    let currentUserSpeed = null;
-    let isWatchingPosition = false;
-
-    // For displaying live position on map
-    let userLivePositionMarker = null;
-    let userAccuracyCircle = null;
-    let followMeActive = false;
-
-    // For Off-Route Notification
-    const OFF_ROUTE_THRESHOLD_METERS = 25; // Approx 25 meters
-    const VISUAL_SNAP_THRESHOLD_METERS = 15; // User marker visually snaps if within this distance
-    let isCurrentlyNotifyingOffRoute = false;
-    let originalDestination = null; // Stores details of the original destination for recalculation
-
-    function initCustomMapLogic(generatedMapId) {
-        console.log("initCustomMapLogic called with map ID:", generatedMapId);
-
-        if (window[generatedMapId] && typeof window[generatedMapId].getCenter === 'function') {
-            console.log("SUCCESS: Folium map instance found in initCustomMapLogic using ID:", generatedMapId);
-            mapInstance = window[generatedMapId];
-
-            // For testing, let's try a simple map action here:
-            if (mapInstance.getCenter) {
-                console.log("Map center from initCustomMapLogic:", mapInstance.getCenter());
-            }
-
+    } else {
+        console.error("ERROR: initCustomMapLogic was called, but window[generatedMapId] is not a valid map object.", generatedMapId);
+        // Fallback logic (belt-and-suspenders)
+        if (window.map_map && typeof window.map_map.getCenter === 'function') {
+            console.warn("Found 'window.map_map' as fallback in initCustomMapLogic.");
+            mapInstance = window.map_map;  // Set the global mapInstance
         } else {
-            console.error("ERROR: initCustomMapLogic was called, but window[generatedMapId] is not a valid map object.", generatedMapId);
-            // Fallback logic (belt-and-suspenders)
-            if (window.map_map && typeof window.map_map.getCenter === 'function') {
-                console.warn("Found 'window.map_map' as fallback in initCustomMapLogic.");
-                mapInstance = window.map_map;
-            } else {
-                 for (let key in window) {
-                    if (key.startsWith("map_") && key !== generatedMapId && window[key] && typeof window[key].getCenter === 'function') {
-                        console.warn(`Found map instance by iteration as '${key}' in initCustomMapLogic fallback.`);
-                        mapInstance = window[key];
-                        break;
-                    }
+             for (let key in window) {
+                if (key.startsWith("map_") && key !== generatedMapId && window[key] && typeof window[key].getCenter === 'function') {
+                    console.warn(`Found map instance by iteration as '${key}' in initCustomMapLogic fallback.`);
+                    mapInstance = window[key]; // Set the global mapInstance
+                    break;
                 }
             }
-            if (!mapInstance) {
-                console.error("CRITICAL: Map instance still not found even after initCustomMapLogic was called and fallbacks attempted.");
-                // alert("Map critical initialization error. Please refresh.");
-            } else {
-                // Add map click listener once mapInstance is confirmed
-                mapInstance.on('click', function(e) {
-                    // If followMeActive is true, a map click should probably disable it.
-                    if (followMeActive) {
-                        toggleFollowMeMode(); // This will set followMeActive to false and update UI
-                        console.log("Follow Me mode disabled due to map click.");
-                    }
-
-                    clickedLat = e.latlng.lat;
-                    clickedLng = e.latlng.lng;
-
-                    if (clickedPointMarker && mapInstance.hasLayer(clickedPointMarker)) {
-                        mapInstance.removeLayer(clickedPointMarker);
-                    }
-
-                    clickedPointMarker = L.marker([clickedLat, clickedLng]).addTo(mapInstance);
-
-                    const popupContent = `
-                        <div>
-                            <strong>Set Location:</strong><br>
-                            Lat: ${clickedLat.toFixed(5)}, Lon: ${clickedLng.toFixed(5)}<br>
-                            <button class='btn btn-sm btn-primary mt-1' onclick='setClickedPointAsStart()'>Set as Start</button>
-                            <button class='btn btn-sm btn-success mt-1 ms-1' onclick='setClickedPointAsDestination()'>Set as Destination</button>
-                        </div>
-                    `;
-                    clickedPointMarker.bindPopup(popupContent).openPopup();
-                });
-
-                // Add event listener for manual map pan (dragstart)
-                mapInstance.on('dragstart', function() {
-                    if (followMeActive) {
-                        // No need to call toggleFollowMeMode() as it would flip followMeActive back
-                        followMeActive = false;
-                        const button = document.getElementById('toggleFollowMe');
-                        if (button) {
-                            button.textContent = 'Follow Me: Off';
-                            button.classList.remove('btn-success');
-                            button.classList.add('btn-secondary');
-                        }
-                        console.log("Follow Me mode disabled due to manual map pan.");
-                    }
-                });
-
-                // Since mapInstance is confirmed here, this is a good place to start GPS watching.
-                console.log("initCustomMapLogic: Map instance confirmed. Calling startWatchingPosition().");
-                startWatchingPosition();
-                console.log("initCustomMapLogic: Calling loadAndDisplayGeofences after startWatchingPosition.");
-                loadAndDisplayGeofences(); // Call to load geofences
-            }
+        }
+        if (!mapInstance) {
+            console.error("CRITICAL: Map instance still not found even after initCustomMapLogic was called and fallbacks attempted.");
+            // alert("Map critical initialization error. Please refresh.");
         }
     }
+
+    // This check needs to be AFTER mapInstance is potentially set by the above logic
+    if (mapInstance) {
+        // Add map click listener once mapInstance is confirmed
+        mapInstance.on('click', function(e) {
+            // If followMeActive is true, a map click should probably disable it.
+            if (followMeActive) {
+                toggleFollowMeMode(); // This will set followMeActive to false and update UI
+                console.log("Follow Me mode disabled due to map click.");
+            }
+
+            clickedLat = e.latlng.lat;
+            clickedLng = e.latlng.lng;
+
+            if (clickedPointMarker && mapInstance.hasLayer(clickedPointMarker)) {
+                mapInstance.removeLayer(clickedPointMarker);
+            }
+
+            clickedPointMarker = L.marker([clickedLat, clickedLng]).addTo(mapInstance);
+
+            const popupContent = `
+                <div>
+                    <strong>Set Location:</strong><br>
+                    Lat: ${clickedLat.toFixed(5)}, Lon: ${clickedLng.toFixed(5)}<br>
+                    <button class='btn btn-sm btn-primary mt-1' onclick='setClickedPointAsStart()'>Set as Start</button>
+                    <button class='btn btn-sm btn-success mt-1 ms-1' onclick='setClickedPointAsDestination()'>Set as Destination</button>
+                </div>
+            `;
+            clickedPointMarker.bindPopup(popupContent).openPopup();
+        });
+
+        // Add event listener for manual map pan (dragstart)
+        mapInstance.on('dragstart', function() {
+            if (followMeActive) {
+                // No need to call toggleFollowMeMode() as it would flip followMeActive back
+                followMeActive = false;
+                const button = document.getElementById('toggleFollowMe');
+                if (button) {
+                    button.textContent = 'Follow Me: Off';
+                    button.classList.remove('btn-success');
+                    button.classList.add('btn-secondary');
+                }
+                console.log("Follow Me mode disabled due to manual map pan.");
+            }
+        });
+
+        // Since mapInstance is confirmed here, this is a good place to start GPS watching.
+        console.log("initCustomMapLogic: Map instance confirmed. Calling startWatchingPosition().");
+        startWatchingPosition();
+        loadAndDisplayGeofences(); // Call to load geofences
+    } else {
+        console.error("initCustomMapLogic: mapInstance is STILL null after all attempts. GPS and geofences will not load.");
+    }
+}
 
 // Functions to handle setting clicked point as Start or Destination
 function setClickedPointAsStart() {
@@ -671,40 +471,41 @@ function getClosestPointOnPolyline(polyline, latLng) {
 document.addEventListener('DOMContentLoaded', function() {
     // Primary initialization of mapInstance and subsequent calls (like startWatchingPosition)
     // should happen via initCustomMapLogic, which is called by the Folium map's embedded script.
+    // The global mapInstance is expected to be set by initCustomMapLogic.
+    console.log("DOMContentLoaded event fired.");
+    console.log("Attempting to use DYNAMIC_MAP_ID_FROM_DJANGO (available globally):", DYNAMIC_MAP_ID_FROM_DJANGO);
+
 
     // Fallback for mapInstance initialization if initCustomMapLogic was somehow missed or delayed,
     // though this should ideally not be the primary path.
     if (!mapInstance && DYNAMIC_MAP_ID_FROM_DJANGO) {
-        console.log("DOMContentLoaded: mapInstance not yet set. Attempting to find map via DYNAMIC_MAP_ID_FROM_DJANGO:", DYNAMIC_MAP_ID_FROM_DJANGO);
+        console.log("DOMContentLoaded: mapInstance not yet set by initCustomMapLogic. Attempting to find map via DYNAMIC_MAP_ID_FROM_DJANGO:", DYNAMIC_MAP_ID_FROM_DJANGO);
         if(window[DYNAMIC_MAP_ID_FROM_DJANGO] && typeof window[DYNAMIC_MAP_ID_FROM_DJANGO].getCenter === 'function') {
             mapInstance = window[DYNAMIC_MAP_ID_FROM_DJANGO];
             console.log("Map instance set during DOMContentLoaded using DYNAMIC_MAP_ID_FROM_DJANGO (fallback).");
             // If mapInstance is found here, and startWatchingPosition hasn't been called yet (e.g. if initCustomMapLogic didn't call it)
             // This indicates a potential issue with initCustomMapLogic not being called or map not ready then.
             // For robustness, we could call startWatchingPosition here IF it hasn't been started.
-                if (!isWatchingPosition && mapInstance) { // Check a flag to prevent multiple starts
-                     console.warn("DOMContentLoaded: mapInstance found (fallback), but GPS watching not started. Starting now.");
+            if (!isWatchingPosition && mapInstance) { // Check a flag to prevent multiple starts
+                 console.warn("DOMContentLoaded: mapInstance found (fallback), but GPS watching not started. Starting now.");
                  startWatchingPosition();
-                     loadAndDisplayGeofences(); // Also load geofences
+                 loadAndDisplayGeofences(); // Also load geofences
             }
         } else {
             console.warn("DOMContentLoaded: Map instance still not found using DYNAMIC_MAP_ID_FROM_DJANGO.");
         }
-        } else if (mapInstance) {
-            console.log("DOMContentLoaded: mapInstance was already set (likely by initCustomMapLogic).");
-            // If initCustomMapLogic already ran and set mapInstance, it should have also called startWatchingPosition and loadAndDisplayGeofences.
-            // However, if there's a race condition, we can add checks here.
-            if (!isWatchingPosition) {
-                console.warn("DOMContentLoaded: mapInstance is set, but GPS watching not started. Starting now (possible race condition fix).");
-                startWatchingPosition();
-            }
-            // Check if geofences were loaded, potentially call it if a flag indicates it hasn't run.
-            // This assumes loadAndDisplayGeofences is idempotent or handles multiple calls safely.
-            // if (!geofencesLoaded && mapInstance) { // Assuming a hypothetical geofencesLoaded flag
-            //    console.warn("DOMContentLoaded: mapInstance is set, GPS started, but geofences not loaded. Calling now.");
-            //    loadAndDisplayGeofences();
-            // }
+    } else if (mapInstance) {
+        console.log("DOMContentLoaded: mapInstance was already set (likely by initCustomMapLogic).");
+        // If initCustomMapLogic already ran and set mapInstance, it should have also called startWatchingPosition and loadAndDisplayGeofences.
+        // However, if there's a race condition, we can add checks here.
+        if (!isWatchingPosition) {
+            console.warn("DOMContentLoaded: mapInstance is set, but GPS watching not started. Starting now (possible race condition fix).");
+            startWatchingPosition();
+        }
+        // Assuming loadAndDisplayGeofences is also called in initCustomMapLogic after mapInstance is set.
+        // If not, it could be called here too, guarded by a flag if necessary.
     }
+
 
     // Attach event listener for the Follow Me button
     const followMeButton = document.getElementById('toggleFollowMe');
@@ -718,7 +519,7 @@ document.addEventListener('DOMContentLoaded', function() {
             searchInput.addEventListener('input', function() {
                 const query = this.value.trim();
                 if (query.length >= 2) {
-                    fetch(`{% url 'search_locations' %}?q=${query}`)
+                    fetch(`${SEARCH_LOCATIONS_URL}?q=${encodeURIComponent(query)}`) // Use global var
                         .then(response => response.json())
                         .then(data => {
                             const resultsContainer = document.getElementById('searchResults');
@@ -743,6 +544,10 @@ document.addEventListener('DOMContentLoaded', function() {
                             } else {
                                 resultsContainer.innerHTML = '<div class="list-group-item">No results found</div>';
                             }
+                        })
+                        .catch(error => {
+                            console.error('Error fetching search results:', error);
+                            document.getElementById('searchResults').innerHTML = '<div class="list-group-item list-group-item-danger">Error loading results</div>';
                         });
                 } else {
                      document.getElementById('searchResults').innerHTML = ''; // Clear results if query is too short
@@ -756,10 +561,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 e.preventDefault(); // Prevent form submission
             });
         }
-
-        // Other initializations that depend on the DOM but not necessarily on mapInstance immediately
-        // For example, setting up modal events if any, etc.
-
 
         // --- Start of Get Directions JavaScript (New Block) ---
 
@@ -775,7 +576,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 resultsContainer.innerHTML = '';
                 return;
             }
-            fetch(`{% url 'search_locations' %}?q=${encodeURIComponent(query)}`)
+            fetch(`${SEARCH_LOCATIONS_URL}?q=${encodeURIComponent(query)}`) // Use global var
                 .then(response => response.json())
                 .then(data => {
                     resultsContainer.innerHTML = '';
@@ -934,9 +735,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // This function can be simplified if initCustomMapLogic is the sole reliable initializer.
     function ensureMapInstance() {
         if (!mapInstance) {
-            console.warn("ensureMapInstance: mapInstance is not set. Attempting to retrieve it via DYNAMIC_MAP_ID_FROM_DJANGO:", DYNAMIC_MAP_ID_FROM_DJANGO);
-            if (window[DYNAMIC_MAP_ID_FROM_DJANGO] && typeof window[DYNAMIC_MAP_ID_FROM_DJANGO].getCenter === 'function') {
-                 mapInstance = window[DYNAMIC_MAP_ID_FROM_DJANGO];
+            console.warn("ensureMapInstance: mapInstance is not set. Attempting to retrieve it via DYNAMIC_MAP_ID_FROM_DJANGO:", DYNAMIC_MAP_ID_FROM_DJANGO); // Use global
+            if (window[DYNAMIC_MAP_ID_FROM_DJANGO] && typeof window[DYNAMIC_MAP_ID_FROM_DJANGO].getCenter === 'function') { // Use global
+                 mapInstance = window[DYNAMIC_MAP_ID_FROM_DJANGO]; // Use global
                  console.log("ensureMapInstance: mapInstance acquired using DYNAMIC_MAP_ID_FROM_DJANGO.");
             } else {
                  console.error("ensureMapInstance: Could not acquire mapInstance. Map interactions will likely fail.");
@@ -956,7 +757,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        fetch(`/api/location-details/${locationId}/`)
+        fetch(`${LOCATION_DETAILS_API_BASE_URL}${locationId}/`) // Use global var
             .then(response => response.json())
             .then(locationData => {
                 if (locationData.success && locationData.latitude && locationData.longitude) {
@@ -1006,10 +807,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const DEFAULT_ORIGIN_ID_PLACEHOLDER = "YOUR_COICT_CENTER_LOCATION_ID_REPLACE_ME"; // DEVELOPER MUST REPLACE
 
         function handleFallback(errorType = "last_known_failed") {
-            // Fallback: Make an AJAX call to get the user's last known location.
-            // {% url 'get_last_user_location' %} is a placeholder and will not work until the view and URL are created.
-            // For testing, this path might lead to the default ID if the URL isn't set up.
-            fetch("{% url 'get_last_user_location' %}")
+            fetch(GET_LAST_USER_LOCATION_URL) // Use global var
                 .then(response => {
                     if (!response.ok) throw new Error(`Network response for last_known_location was not ok (${response.status})`);
                     return response.json();
@@ -1065,69 +863,61 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function fetchAndDisplayRoute(navigationParams) {
-        // This function will be the refactored logic from setAsDestination (first draft)
         console.log("fetchAndDisplayRoute called with params:", navigationParams);
 
-    // Store original destination for potential recalculation
-    originalDestination = {};
-    if (navigationParams.to_id) {
-        originalDestination.id = navigationParams.to_id;
-        originalDestination.name = navigationParams.to_name || selectedEndLocationName || 'Selected Destination ID: ' + navigationParams.to_id;
-    } else if (navigationParams.to_latitude && navigationParams.to_longitude) {
-        originalDestination.lat = navigationParams.to_latitude;
-        originalDestination.lon = navigationParams.to_longitude;
-        originalDestination.name = navigationParams.to_name || `Map Pin: ${navigationParams.to_latitude.toFixed(5)}, ${navigationParams.to_longitude.toFixed(5)}`;
-    } else {
-        originalDestination = null;
-        console.error("Cannot store original destination: Missing to_id or to_lat/lon in navigationParams for fetchAndDisplayRoute.", navigationParams);
-        // Not alerting here as it might be too disruptive during a normal route fetch if params are bad.
-    }
-    console.log("Original destination for recalculation stored:", originalDestination);
+        originalDestination = {};
+        if (navigationParams.to_id) {
+            originalDestination.id = navigationParams.to_id;
+            originalDestination.name = navigationParams.to_name || selectedEndLocationName || 'Selected Destination ID: ' + navigationParams.to_id;
+        } else if (navigationParams.to_latitude && navigationParams.to_longitude) {
+            originalDestination.lat = navigationParams.to_latitude;
+            originalDestination.lon = navigationParams.to_longitude;
+            originalDestination.name = navigationParams.to_name || `Map Pin: ${navigationParams.to_latitude.toFixed(5)}, ${navigationParams.to_longitude.toFixed(5)}`;
+        } else {
+            originalDestination = null;
+            console.error("Cannot store original destination: Missing to_id or to_lat/lon in navigationParams for fetchAndDisplayRoute.", navigationParams);
+        }
+        console.log("Original destination for recalculation stored:", originalDestination);
 
-
-    if (!ensureMapInstance()) {
+        if (!ensureMapInstance()) {
             alert("Map is not available to display the route.");
             return;
         }
 
-    // Clear previous route visualizations (this was already here and is good)
-    if (currentRoutePolyline && mapInstance.hasLayer(currentRoutePolyline)) mapInstance.removeLayer(currentRoutePolyline);
-    if (animatedNavigationMarker && mapInstance.hasLayer(animatedNavigationMarker)) mapInstance.removeLayer(animatedNavigationMarker);
-    currentRoutePolyline = null;
-    animatedNavigationMarker = null;
+        if (currentRoutePolyline && mapInstance.hasLayer(currentRoutePolyline)) mapInstance.removeLayer(currentRoutePolyline);
+        if (animatedNavigationMarker && mapInstance.hasLayer(animatedNavigationMarker)) mapInstance.removeLayer(animatedNavigationMarker);
+        currentRoutePolyline = null;
+        animatedNavigationMarker = null;
 
+        let fetchBody = { /* to_id or to_latitude/longitude will be added below */ };
 
-    let fetchBody = { /* to_id or to_latitude/longitude will be added below */ };
+        if (navigationParams.to_id) {
+            fetchBody.to_id = navigationParams.to_id;
+        } else if (navigationParams.to_latitude && navigationParams.to_longitude) {
+            fetchBody.to_latitude = navigationParams.to_latitude;
+            fetchBody.to_longitude = navigationParams.to_longitude;
+        } else {
+            alert("Destination information missing for navigation.");
+            console.error("Insufficient destination info in fetchAndDisplayRoute:", navigationParams);
+            return;
+        }
 
-    // Destination parameters (for fetch body)
-    if (navigationParams.to_id) {
-        fetchBody.to_id = navigationParams.to_id;
-    } else if (navigationParams.to_latitude && navigationParams.to_longitude) {
-        fetchBody.to_latitude = navigationParams.to_latitude;
-        fetchBody.to_longitude = navigationParams.to_longitude;
-    } else {
-        alert("Destination information missing for navigation.");
-        console.error("Insufficient destination info in fetchAndDisplayRoute:", navigationParams);
-        return;
-    }
-
-    // Start parameters (for fetch body)
         if (navigationParams.from_id) {
             fetchBody.from_id = navigationParams.from_id;
         } else if (navigationParams.from_latitude && navigationParams.from_longitude) {
             fetchBody.from_latitude = navigationParams.from_latitude;
             fetchBody.from_longitude = navigationParams.from_longitude;
         } else {
-        alert("Start location information missing for navigation.");
+            alert("Start location information missing for navigation.");
             console.error("Insufficient start location info in fetchAndDisplayRoute:", navigationParams);
             return;
         }
 
         console.log("Fetching directions with body:", fetchBody);
 
-        fetch("{% url 'get_directions' %}", {
+        fetch(GET_DIRECTIONS_URL, { // Use global var
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}' },
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF_TOKEN }, // Use global var
             body: JSON.stringify(fetchBody)
         })
         .then(response => response.json())
@@ -1144,7 +934,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 mapInstance.fitBounds(currentRoutePolyline.getBounds().pad(0.1));
 
                 const pointerIcon = L.icon({
-                    iconUrl: "{% static 'img/navigation_pointer.png' %}",
+                    iconUrl: NAVIGATION_POINTER_IMG_URL, // Use global var
                     iconSize: [25, 41], iconAnchor: [12, 41]
                 });
 
@@ -1191,9 +981,9 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    function setAsDestination(destinationId, destLat, destLng) { // mapInstance is global
+    function setAsDestination(destinationId, destLat, destLng) {
         console.log(`Preparing navigation to Destination ID: ${destinationId} (from map click)`);
-        if (!ensureMapInstance()) { // ensureMapInstance should be defined globally
+        if (!ensureMapInstance()) {
             alert("Map is not available to set destination.");
             return;
         }
@@ -1201,13 +991,12 @@ document.addEventListener('DOMContentLoaded', function() {
             mapInstance.closePopup();
         }
 
-        // Fetch destination name for display purposes
-        fetch(`/api/location-details/${destinationId}/`)
+        fetch(`${LOCATION_DETAILS_API_BASE_URL}${destinationId}/`) // Use global var
             .then(response => response.json())
             .then(locationData => {
                 const destinationName = locationData.success ? locationData.name : `ID: ${destinationId}`;
 
-                getOriginForNavigation(function(origin) { // Assumes getOriginForNavigation is globally available
+                getOriginForNavigation(function(origin) {
                     if (origin.type === 'error') {
                         alert(`Could not determine origin for navigation: ${origin.message}`);
                         return;
@@ -1224,14 +1013,13 @@ document.addEventListener('DOMContentLoaded', function() {
                         navigationParams.from_name = "Current Location";
                     } else {
                         navigationParams.from_id = origin.id;
-                        navigationParams.from_name = origin.from; // e.g. "Default Fallback"
+                        navigationParams.from_name = origin.from;
                     }
-                    fetchAndDisplayRoute(navigationParams); // Call the refactored function
+                    fetchAndDisplayRoute(navigationParams);
                 });
             })
             .catch(err => {
                 console.error("Error fetching destination details for name:", err);
-                // Fallback if name fetch fails
                 getOriginForNavigation(function(origin) {
                     if (origin.type === 'error') {
                         alert(`Could not determine origin for navigation: ${origin.message}`);
@@ -1251,111 +1039,17 @@ document.addEventListener('DOMContentLoaded', function() {
             });
     }
 
-    // Navigation functions
-        if (!mapInstance) {
-            alert("Map is not available to set destination.");
-            return;
-        }
-        if (mapInstance && typeof mapInstance.closePopup === 'function') {
-            mapInstance.closePopup();
-        }
-
-        getOriginForNavigation(function(origin) {
-            if (origin.type === 'error') {
-                alert(`Could not determine origin for navigation: ${origin.message}`);
-                return;
-            }
-
-            let navigationParams = { to_id: destinationId };
-
-            if (origin.type === 'coords') {
-                navigationParams.from_latitude = origin.lat;
-                navigationParams.from_longitude = origin.lon;
-                console.log(`Navigating from Coords (Source: ${origin.from}): (${origin.lat}, ${origin.lon}) to ID: ${destinationId}`);
-            } else { // type === 'id'
-                navigationParams.from_id = origin.id;
-                console.log(`Navigating from Location ID (Source: ${origin.from}): ${origin.id} to ID: ${destinationId}`);
-            }
-
-            fetch("{% url 'get_directions' %}", {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}' },
-                body: JSON.stringify(navigationParams)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    if (currentRoutePolyline) mapInstance.removeLayer(currentRoutePolyline);
-                    if (animatedNavigationMarker) {
-                        mapInstance.removeLayer(animatedNavigationMarker);
-                    }
-
-                    const latLngs = data.route.path.map(coord => L.latLng(coord[0], coord[1]));
-                    if (latLngs.length < 2) {
-                        alert("Route path is too short to display."); return;
-                    }
-                    currentRoutePolyline = L.polyline(latLngs, { color: 'red', weight: 5, opacity: 0.8 }).addTo(mapInstance);
-                    mapInstance.fitBounds(currentRoutePolyline.getBounds().pad(0.1));
-
-                    const pointerIcon = L.icon({
-                        iconUrl: "{% static 'img/navigation_pointer.png' %}",
-                        iconSize: [25, 41], iconAnchor: [12, 41]
-                    });
-
-                    const totalDurationMs = data.route.estimated_time * 60 * 1000;
-
-                    animatedNavigationMarker = L.Marker.movingMarker(latLngs, [totalDurationMs], {
-                        autostart: true, loop: false, icon: pointerIcon
-                    });
-
-                    animatedNavigationMarker.on('end', function() {
-                        console.log("Navigation animation finished.");
-                        if(mapInstance && latLngs.length > 0) {
-                             L.marker(latLngs[latLngs.length - 1], {icon: pointerIcon})
-                                .addTo(mapInstance)
-                                .bindPopup(`Arrived at ${data.route.destination.name || 'destination'}`)
-                                .openPopup();
-                        }
-                        if(mapInstance && animatedNavigationMarker) mapInstance.removeLayer(animatedNavigationMarker);
-                    });
-                    mapInstance.addLayer(animatedNavigationMarker);
-
-                    const modal = new bootstrap.Modal(document.getElementById('directionsModal'));
-                    const routeDetailsEl = document.getElementById('routeDetails');
-                    routeDetailsEl.innerHTML = `
-                        <h6>From: ${data.route.source.name}</h6>
-                        <h6>To: ${data.route.destination.name}</h6>
-                        <p>Distance: ${data.route.distance.toFixed(0)} meters</p>
-                        <p>Estimated time: ${data.route.estimated_time} minutes</p>
-                        <hr><h6>Steps:</h6>
-                        <ol>${data.route.steps.map(step => `<li>${step.instruction} (${step.distance.toFixed(0)}m, ${Math.round(step.duration/60)} min)</li>`).join('')}</ol>
-                    `;
-                    modal.show();
-                    document.getElementById('map').scrollIntoView({ behavior: 'smooth' });
-                } else {
-                    alert("Error getting directions: " + (data.error || 'Unknown error'));
-                }
-            })
-            .catch(err => {
-                console.error("Error in setAsDestination's fetch call:", err);
-                alert("Could not retrieve new directions. Please check console.");
-            });
-        });
-    }
-    
-    // Navigation functions
     function locateMe() {
         if (navigator.geolocation) {
             navigator.geolocation.getCurrentPosition(
                 position => {
                     const { latitude, longitude, accuracy } = position.coords;
-                    
-                    // Send to server
-                    fetch("{% url 'update_location' %}", {
+
+                    fetch(UPDATE_LOCATION_URL, { // Use global var
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'X-CSRFToken': '{{ csrf_token }}'
+                            'X-CSRFToken': CSRF_TOKEN // Use global var
                         },
                         body: JSON.stringify({
                             latitude: latitude,
@@ -1365,7 +1059,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     }).then(response => response.json())
                       .then(data => {
                           if (data.success) {
-                              // Reload the page to show updated location
                               window.location.reload();
                           }
                       });
@@ -1380,43 +1073,24 @@ document.addEventListener('DOMContentLoaded', function() {
             alert("Geolocation is not supported by your browser.");
         }
     }
-    
-    function zoomIn() {
-        // Implement map zoom in
-        alert("Zooming in - would be implemented with map API");
-    }
-    
-    function zoomOut() {
-        // Implement map zoom out
-        alert("Zooming out - would be implemented with map API");
-    }
-    
-    // Old getDirections(fromId, toId) function is now removed / integrated into setAsDestination.
 
-    // Function for showing recommendation on map (remains mostly unchanged)
+    function zoomIn() {
+        if (ensureMapInstance()) mapInstance.zoomIn();
+    }
+
+    function zoomOut() {
+        if (ensureMapInstance()) mapInstance.zoomOut();
+    }
+
     function showRecommendationOnMap(locationId, mediaUrl) {
         console.log("Attempting to show recommendation on map for Location ID:", locationId, "Media URL:", mediaUrl);
 
-        // Dynamically find the map object if its name is not fixed as map_map
-        let mapInstance = window.map_map; // Default assumption
-        if (!mapInstance) {
-            for (const key in window) {
-                if (key.startsWith('map_') && window[key] && typeof window[key].panTo === 'function') {
-                    mapInstance = window[key];
-                    console.log("Dynamically found map instance:", key);
-                    break;
-                }
-            }
-        }
-
-        if (!mapInstance) {
-            console.error("Folium map instance (e.g., window.map_map or window.map_<map_id>) not found. Cannot interact with map.");
+        if (!ensureMapInstance()) {
             alert("Error: Map object not found. Cannot display recommendation on map.");
             return;
         }
 
-        // Fetch location coordinates
-        fetch(`/api/location-details/${locationId}/`)
+        fetch(`${LOCATION_DETAILS_API_BASE_URL}${locationId}/`) // Use global var
             .then(response => response.json())
             .then(data => {
                 if (data.success && data.latitude && data.longitude) {
@@ -1425,28 +1099,24 @@ document.addEventListener('DOMContentLoaded', function() {
 
                     console.log(`Fetched coordinates for ${data.name}: Lat ${lat}, Lon ${lon}`);
 
-                    // Pan and zoom the map
                     mapInstance.panTo([lat, lon]);
-                    mapInstance.setZoom(18); // Zoom in to a close level
+                    mapInstance.setZoom(18);
 
-                    // Optional: Add a temporary marker (Leaflet syntax, as Folium is Leaflet-based)
-                    // Remove previous recommendation markers if any
-                    if (window.recommendationMarker) {
-                        mapInstance.removeLayer(window.recommendationMarker);
+                    if (recommendationMarker) { // Use global recommendationMarker
+                        mapInstance.removeLayer(recommendationMarker);
                     }
 
-                    window.recommendationMarker = L.marker([lat, lon], {
+                    recommendationMarker = L.marker([lat, lon], { // Assign to global
                         icon: L.divIcon({
-                            className: 'custom-recommendation-marker', // Your custom CSS class
-                            iconSize: [15, 15], // Size of the icon
-                            iconAnchor: [7, 7]  // Anchor point (center)
+                            className: 'custom-recommendation-marker',
+                            iconSize: [15, 15],
+                            iconAnchor: [7, 7]
                         })
                     }).addTo(mapInstance)
                         .bindPopup(`<b>${data.name}</b><br><img src="${mediaUrl}" alt="${data.name}" style="width:100px;height:auto;">`)
                         .openPopup();
 
                     console.log("Map panned and zoomed. Custom recommendation marker added.");
-                    // Scroll to the map if it's not fully visible
                     document.getElementById('map').scrollIntoView({ behavior: 'smooth' });
 
                 } else {
@@ -1460,45 +1130,47 @@ document.addEventListener('DOMContentLoaded', function() {
             });
     }
 
-    function loadAndDisplayGeofences() {
-        if (!mapInstance) { // Ensure mapInstance is available
-            console.warn("Map instance not ready for loading geofences. Will try again shortly.");
-            setTimeout(loadAndDisplayGeofences, 500); // Retry after a short delay
-            return;
-        }
-        console.log("Loading and displaying geofences...");
-        fetch("{% url 'api_get_geofences' %}") // Use Django URL tag directly
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                return response.json();
-            })
-            .then(data => {
-                if (data.geofences && data.geofences.length > 0) {
-                    data.geofences.forEach(gf => {
-                        if (gf.boundary_geojson && mapInstance) {
-                            try {
-                                L.geoJSON(gf.boundary_geojson, {
-                                    style: function (feature) {
-                                        // Example styling, can be customized
-                                        return {color: "#FF5733", weight: 2, opacity: 0.7, fillOpacity: 0.1};
-                                    }
-                                }).bindPopup(`<b>${gf.name}</b><br>${gf.description || 'Geofenced Area'}`)
-                                  .addTo(mapInstance);
-                            } catch (e) {
-                                console.error("Error adding GeoJSON layer for geofence:", gf.name, e);
-                            }
-                        }
-                    });
-                    console.log(data.geofences.length + " geofences loaded onto the map.");
-                } else {
-                    console.log("No geofences to display or data is empty.");
-                }
-            })
-            .catch(error => {
-                console.error("Error fetching or displaying geofences:", error);
-            });
+// --- Geofence Display Functionality ---
+function loadAndDisplayGeofences() {
+    if (!ensureMapInstance()) {
+        console.warn("Map instance not ready for loading geofences.");
+        return;
     }
-</script>
-{% endblock %}
+
+    fetch(GEOFENCES_API_URL) // Use global var
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (data.geofences && data.geofences.length > 0) {
+                data.geofences.forEach(gf => {
+                    if (gf.boundary_geojson && gf.boundary_geojson.coordinates) { // Check for coordinates as well
+                        try {
+                            L.geoJSON(gf.boundary_geojson, {
+                                style: function (feature) {
+                                    // Example: Use a default style, or customize based on gf properties
+                                    return { color: "#ff7800", weight: 2, opacity: 0.65, fillColor: "#ff7800", fillOpacity: 0.1 };
+                                }
+                            }).bindPopup(`<b>${gf.name}</b><br>${gf.description || 'Geofenced Area'}`)
+                              .addTo(mapInstance);
+                        } catch (e) {
+                            console.error("Error creating GeoJSON layer for geofence:", gf.name, e);
+                        }
+                    } else {
+                        console.warn("Geofence data missing boundary_geojson or coordinates:", gf);
+                    }
+                });
+                console.log(`${data.geofences.length} geofences loaded and displayed.`);
+            } else {
+                console.log("No active geofences to display or API returned empty list.");
+            }
+        })
+        .catch(error => {
+            console.error("Error fetching or displaying geofences:", error);
+            // Optionally, inform the user on the UI, but avoid alerts for background tasks
+        });
+}
+// --- End Geofence Display Functionality ---
