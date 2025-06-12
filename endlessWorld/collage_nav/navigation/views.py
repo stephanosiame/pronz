@@ -895,49 +895,6 @@ def password_reset_verify(request, user_id):
     
     return render(request, 'password_reset_verify.html', {'user': user})
 
-@login_required
-def update_location(request):
-    """Update user's current location with geofence checking"""
-    if request.method == 'POST':
-        data = json.loads(request.body)
-        latitude = data.get('latitude')
-        longitude = data.get('longitude')
-        accuracy = data.get('accuracy', 0)
-        
-        if latitude and longitude:
-            location = Point(longitude, latitude)  # Note: Point(x, y) = Point(lng, lat)
-            
-            # Save user location
-            user_location = UserLocation.objects.create(
-                user=request.user,
-                location=location,
-                accuracy=accuracy,
-                timestamp=timezone.now()
-            )
-            
-            # Check geofences for alerts
-            check_geofences(request.user, location)
-            
-            # Clean up old location records (keep only last 50)
-            old_locations = UserLocation.objects.filter(
-                user=request.user
-            ).order_by('-timestamp')[50:]
-            
-            if old_locations:
-                UserLocation.objects.filter(
-                    id__in=[loc.id for loc in old_locations]
-                ).delete()
-            
-            return JsonResponse({
-                'success': True,
-                'message': 'Location updated successfully'
-            })
-    
-    return JsonResponse({
-        'success': False,
-        'error': 'Invalid location data'
-    })
-
 def check_geofences(user, location):
     """Check if user entered/exited any geofences and send alerts"""
     active_geofences = Geofence.objects.filter(is_active=True)
@@ -1018,30 +975,6 @@ def update_preferences(request):
         })
     
     return JsonResponse({'success': False})
-
-@login_required
-def get_last_user_location(request):
-    if request.method == 'GET':
-        try:
-            last_location_obj = UserLocation.objects.filter(user=request.user).latest('timestamp')
-            if last_location_obj and last_location_obj.location: # Check if location PointField is not null
-                return JsonResponse({
-                    'success': True,
-                    'latitude': last_location_obj.location.y,
-                    'longitude': last_location_obj.location.x,
-                    'timestamp': last_location_obj.timestamp
-                })
-            else:
-                # This case might be rare if UserLocation always saves a valid Point.
-                return JsonResponse({'success': False, 'message': 'Last location data is invalid or empty.'})
-        except UserLocation.DoesNotExist:
-            return JsonResponse({'success': False, 'message': 'No location history found for this user.'})
-        except Exception as e:
-            # Log the exception e for server-side debugging
-            print(f"Error in get_last_user_location: {e}") # Basic logging
-            return JsonResponse({'success': False, 'message': 'An error occurred while fetching last location.'}, status=500)
-    else:
-        return JsonResponse({'success': False, 'message': 'Invalid request method. Only GET is allowed.'}, status=405)
 
 @login_required
 def get_location_details_json(request, location_id):

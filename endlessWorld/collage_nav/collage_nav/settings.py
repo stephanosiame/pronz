@@ -51,17 +51,6 @@ TEMPLATES = [
     },
 ]
 
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.contrib.gis.db.backends.postgis',
-#         'NAME': config('collage_nav', default='collage_nav'),
-#         'USER': config('steph', default='steph'),
-#         'PASSWORD': config('admin2025', default='admin2025'),
-#         'HOST': config('localhost', default='localhost'),
-#         'PORT': config('5432', default='5432'),
-#     }
-# }
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.contrib.gis.db.backends.postgis',
@@ -111,8 +100,6 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:8000",
     "http://127.0.0.1:8081",
 ]
-
-# CRISPY_TEMPLATE_PACK = 'bootstrap4'  # or 'bootstrap5' if you're using that
 
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

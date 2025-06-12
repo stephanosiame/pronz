@@ -106,11 +106,7 @@ def load_coict_graph():
 # This should be called by applications using the utils, not necessarily on module import
 # to give more control over when this potentially long operation runs.
 # For now, keeping it as is based on original structure.
-if __name__ == '__main__': # Example of how it might be controlled
-    load_coict_graph()
-else:
-    # If not running as main, load it as it was originally
-    load_coict_graph()
+load_coict_graph()
 
 def send_sms(phone_number, message):
     """Send SMS using Twilio"""
