@@ -201,11 +201,11 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="{% static 'js/libs/leaflet.movingmarker.js' %}"></script>
 <script>
     // Global JavaScript constants for Django URLs and values
     const DYNAMIC_MAP_ID_FROM_DJANGO = "{{ map_id|escapejs }}";
     const CSRF_TOKEN = "{{ csrf_token }}";
+    const LEAFLET_MOVINGMARKER_JS_URL = "{% static 'js/libs/leaflet.movingmarker.js' %}";
     const SEARCH_LOCATIONS_URL = "{% url 'search_locations' %}";
     const LOCATION_DETAILS_API_BASE_URL = "/api/location-details/"; // Assuming format /api/location-details/<id>/
     const GET_DIRECTIONS_URL = "{% url 'get_directions' %}";
