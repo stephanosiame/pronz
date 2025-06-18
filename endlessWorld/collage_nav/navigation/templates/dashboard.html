@@ -201,7 +201,7 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="https://unpkg.com/leaflet.movingmarker@0.3.0/dist/leaflet.movingmarker.min.js"></script>
+<script src="{% static 'js/libs/leaflet.movingmarker.js' %}"></script>
 <script>
     // Global JavaScript constants for Django URLs and values
     const DYNAMIC_MAP_ID_FROM_DJANGO = "{{ map_id|escapejs }}";
