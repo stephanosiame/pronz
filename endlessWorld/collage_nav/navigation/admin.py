@@ -35,7 +35,7 @@ from django.utils import timezone # Needed for admin actions
 
 admin.site.register(CustomUser) # Kept for now
 # Location is handled by LocationAdmin
-admin.site.register(NavigationRoute) # Kept for now
+# admin.site.register(NavigationRoute) # Will be handled by NavigationRouteAdmin
 admin.site.register(UserSearch) # Kept for now
 admin.site.register(Geofence) # Kept for now
 admin.site.register(SMSAlert) # Kept for now
@@ -102,6 +102,13 @@ class LocationAdmin(gis_admin.GISModelAdmin): # Inherit from GISModelAdmin (OSMG
     default_lat = COICT_CENTER_LAT_ADMIN
     default_lon = COICT_CENTER_LON_ADMIN
     default_zoom = 16 # A bit more zoomed in for better detail initially
+
+@gis_admin.register(NavigationRoute)
+class NavigationRouteAdmin(gis_admin.GISModelAdmin):
+    list_display = ('route_id', 'source_location', 'destination_location', 'distance', 'estimated_time', 'is_accessible')
+    search_fields = ('source_location__name', 'destination_location__name')
+    list_filter = ('is_accessible', 'difficulty_level')
+    # route_path will automatically use the map widget from GISModelAdmin
 
 # @gis_admin.register(SMSAlert) # Use gis_admin if SMSAlert had GeoDjango fields, otherwise admin.register
 # class SMSAlertAdmin(admin.ModelAdmin): # If not a GeoDjango model, use admin.ModelAdmin
