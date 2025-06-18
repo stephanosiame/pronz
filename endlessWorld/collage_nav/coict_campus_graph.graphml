@@ -1,7 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <graphml xmlns="http://graphml.graphdrawing.org/xmlns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd">
-<<<<<<< HEAD
-  <graph edgedefault="directed" />
+=======
 =======
   <key id="d17" for="edge" attr.name="tunnel" attr.type="string" />
   <key id="d16" for="edge" attr.name="width" attr.type="string" />
@@ -2153,5 +2152,4 @@
     <data key="d2">epsg:4326</data>
     <data key="d3">True</data>
   </graph>
->>>>>>> 10b11d13a372277b158232b5c24ea359d3c68981
 </graphml>

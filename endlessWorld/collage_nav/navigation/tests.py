@@ -822,4 +822,112 @@ class GeofenceApiTests(TestCase):
         response = self.client.get(reverse('api_get_geofences'))
         self.assertEqual(response.status_code, 302) # Redirects to login
         self.assertTrue(reverse('login') in response.url)
+
+
+class RoutingTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+
+        # Create test locations
+        # Ensure location_type are valid choices from Location.LOCATION_TYPES
+        # Example: ('building', 'Building'), ('entrance', 'Entrance'), ('cafeteria', 'Cafeteria')
+
+        self.gate_location, self.gate_created = Location.objects.get_or_create(
+            name="Test CoICT Gate",
+            defaults={
+                'location_id': uuid.uuid4(),
+                'coordinates': Point(39.2376632, -6.770756, srid=4326), # Matches a node in graphml
+                'description': 'Main entrance gate for CoICT campus - Test',
+                'location_type': 'entrance',
+                'is_active': True,
+                'is_searchable': True
+            }
+        )
+        # If the location was retrieved and not created, its ID might be different than what calculate_route expects
+        # or it might not be exactly what we need for a clean test.
+        # For simplicity in this test, we'll ensure a fresh ID if it wasn't created.
+        # In a more complex setup, you might want to delete existing test data before each run.
+        if not self.gate_created:
+            # If it already existed, we might want to update it or ensure it's suitable.
+            # For this test, let's ensure it has a known UUID if we didn't just create it.
+            # However, get_or_create handles this. If it exists, we use it.
+            # The main concern is if the existing one has a different coordinate that makes the test fail.
+            # For now, we assume get_or_create gives us a usable object.
+            pass
+
+
+        self.cafeteria_location, self.cafeteria_created = Location.objects.get_or_create(
+            name="Test Cafeteria",
+            defaults={
+                'location_id': uuid.uuid4(),
+                'coordinates': Point(39.2400133, -6.7712043, srid=4326), # Matches COICT_CENTER_LON, COICT_CENTER_LAT
+                'description': 'Main cafeteria at CoICT campus - Test',
+                'location_type': 'cafeteria',
+                'is_active': True,
+                'is_searchable': True
+            }
+        )
+        if not self.cafeteria_created:
+            pass
+
+    def test_get_directions_valid_locations(self):
+        """
+        Test the get_directions view with valid start and end locations specified by their IDs.
+        This also implicitly tests utils.calculate_route.
+        """
+        # Ensure the locations were actually fetched or created
+        self.assertIsNotNone(self.gate_location)
+        self.assertIsNotNone(self.cafeteria_location)
+        self.assertIsNotNone(self.gate_location.location_id)
+        self.assertIsNotNone(self.cafeteria_location.location_id)
+
+        data = {
+            'from_id': str(self.gate_location.location_id),
+            'to_id': str(self.cafeteria_location.location_id),
+            'mode': 'walking' # Assuming 'walking' is a valid mode
+        }
+        url = reverse('get_directions')
+
+        response = self.client.post(
+            url,
+            data=json.dumps(data),
+            content_type='application/json'
+        )
+
+        self.assertEqual(response.status_code, 200, f"Response content: {response.content.decode()}")
+
+        try:
+            response_data = json.loads(response.content)
+        except json.JSONDecodeError:
+            self.fail(f"Failed to decode JSON. Response content: {response.content.decode()}")
+
+        self.assertTrue(response_data.get('success'), f"API call failed. Response: {response_data}")
+        self.assertIn('route', response_data, "Response data should contain 'route' key.")
+
+        route_info = response_data['route']
+        self.assertIsInstance(route_info.get('path'), list, "'path' should be a list.")
+        self.assertTrue(len(route_info.get('path')) > 0, "'path' list should not be empty.")
+
+        # Validate structure of path elements (assuming list of coordinate pairs/tuples)
+        for point in route_info['path']:
+            self.assertIsInstance(point, (list, tuple), "Each point in path should be a list or tuple.")
+            self.assertEqual(len(point), 2, "Each point in path should have 2 coordinates (lat, lon).")
+            self.assertIsInstance(point[0], (float, int), "Latitude should be float or int.")
+            self.assertIsInstance(point[1], (float, int), "Longitude should be float or int.")
+
+        self.assertIsInstance(route_info.get('distance'), (float, int), "'distance' should be a float or int.")
+        self.assertTrue(route_info.get('distance') > 0, "'distance' should be greater than 0.")
+
+        self.assertIsInstance(route_info.get('estimated_time'), int, "'estimated_time' should be an integer.")
+        self.assertTrue(route_info.get('estimated_time') >= 0, "'estimated_time' should be non-negative.")
+
+        # Optional: Check for duration if it's expected
+        if 'duration' in route_info:
+            self.assertIsInstance(route_info.get('duration'), (float, int), "'duration' should be a float or int.")
+            self.assertTrue(route_info.get('duration') >= 0)
+
+        # Optional: Check for steps if they are expected
+        if 'steps' in route_info:
+            self.assertIsInstance(route_info.get('steps'), list, "'steps' should be a list.")
+            # Further validation of steps structure can be added here if needed
 ```
