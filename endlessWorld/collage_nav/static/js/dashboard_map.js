@@ -64,6 +64,7 @@ window.initCustomMapLogic = function(generatedMapId) {
         console.error("CRITICAL: Map instance still not found even after initCustomMapLogic was called and fallbacks attempted.");
         // alert("Map critical initialization error. Please refresh.");
     } else {
+        // Basic map event listeners
         mapInstance.on('click', function(e) {
             if (followMeActive) {
                 toggleFollowMeMode();
@@ -98,10 +99,222 @@ window.initCustomMapLogic = function(generatedMapId) {
                 console.log("Follow Me mode disabled due to manual map pan.");
             }
         });
+
+        // Start watching position and load geofences (can be here if they don't depend on MovingMarker)
         console.log("initCustomMapLogic: Map instance confirmed. Calling startWatchingPosition().");
         startWatchingPosition();
         console.log("initCustomMapLogic: Calling loadAndDisplayGeofences after startWatchingPosition.");
         loadAndDisplayGeofences();
+
+        // Dynamically load Leaflet.MovingMarker
+        console.log("Map instance confirmed. Dynamically loading leaflet.movingmarker.js...");
+        const movingMarkerScript = document.createElement('script');
+        movingMarkerScript.src = LEAFLET_MOVINGMARKER_JS_URL; // Use the global constant
+        movingMarkerScript.onload = function() {
+            console.log("leaflet.movingmarker.js loaded successfully.");
+            if (typeof L.Marker.movingMarker === 'function') {
+                console.log("L.Marker.movingMarker is now defined.");
+                initializeDashboardAppLogic(); // Initialize the rest of the app logic
+            } else {
+                console.error("L.Marker.movingMarker is STILL NOT defined after loading script!");
+                alert("Critical error: MovingMarker plugin did not initialize correctly.");
+            }
+        };
+        movingMarkerScript.onerror = function() {
+            console.error("Error loading leaflet.movingmarker.js dynamically.");
+            alert("Error loading essential map component (MovingMarker). Some features may not work.");
+        };
+        document.head.appendChild(movingMarkerScript);
+    }
+}
+
+
+function initializeDashboardAppLogic() {
+    if (!mapInstance && DYNAMIC_MAP_ID_FROM_DJANGO) {
+        if(window[DYNAMIC_MAP_ID_FROM_DJANGO] && typeof window[DYNAMIC_MAP_ID_FROM_DJANGO].getCenter === 'function') {
+            mapInstance = window[DYNAMIC_MAP_ID_FROM_DJANGO];
+            // This fallback for mapInstance might be redundant if initCustomMapLogic is robust
+            // and if MovingMarker loaded, mapInstance should already be set.
+            // However, keeping parts of the original DOMContentLoaded logic related to mapInstance check.
+            // The calls to startWatchingPosition and loadAndDisplayGeofences might be duplicative
+            // if initCustomMapLogic already handled them. Consider removing if they are.
+            if (!isWatchingPosition && mapInstance) { // Check if already started
+                 console.warn("initializeDashboardAppLogic: Fallback map found, GPS not started. Starting now.");
+                 startWatchingPosition();
+                 loadAndDisplayGeofences(); // Ensure geofences are loaded if map found this way
+            }
+        }
+    } else if (mapInstance) {
+        // If mapInstance was set by initCustomMapLogic, and MovingMarker loaded,
+        // then startWatchingPosition and loadAndDisplayGeofences should ideally have been called.
+        // This is a safety check.
+        if (!isWatchingPosition) {
+            console.warn("initializeDashboardAppLogic: mapInstance set, but GPS not started. Starting now (possible race condition).");
+            startWatchingPosition();
+            loadAndDisplayGeofences(); // Ensure geofences loaded
+        }
+    }
+
+    const followMeButton = document.getElementById('toggleFollowMe');
+    if (followMeButton) followMeButton.addEventListener('click', toggleFollowMeMode);
+
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput) {
+        searchInput.addEventListener('input', function() {
+            const query = this.value.trim();
+            const resultsContainer = document.getElementById('searchResults');
+            if (query.length >= 2) {
+                fetch(`${SEARCH_LOCATIONS_URL}?q=${encodeURIComponent(query)}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        resultsContainer.innerHTML = '';
+                        if (data.locations.length > 0) {
+                            data.locations.forEach(location => {
+                                const item = document.createElement('a');
+                                item.href = '#';
+                                item.className = 'list-group-item list-group-item-action';
+                                item.innerHTML = `<h6>${location.name}</h6><small class="text-muted">${location.location_type}</small><p class="mb-1">${location.description || ''}</p>`;
+                                item.addEventListener('click', (e) => {
+                                    e.preventDefault();
+                                    showLocation(location.location_id);
+                                });
+                                resultsContainer.appendChild(item);
+                            });
+                        } else {
+                            resultsContainer.innerHTML = '<div class="list-group-item">No results found</div>';
+                        }
+                    });
+            } else {
+                 resultsContainer.innerHTML = '';
+            }
+        });
+    }
+
+    const searchForm = document.getElementById('searchForm');
+    if (searchForm) searchForm.addEventListener('submit', (e) => e.preventDefault());
+
+    const startPointInput = document.getElementById('startPointInput');
+    const startPointResults = document.getElementById('startPointResults');
+    const destinationPointInput = document.getElementById('destinationPointInput');
+    const destinationPointResults = document.getElementById('destinationPointResults');
+
+    function displayLocationSuggestions(query, resultsContainer, onSelectCallback) {
+        if (query.length < 2) {
+            resultsContainer.innerHTML = ''; return;
+        }
+        fetch(`${SEARCH_LOCATIONS_URL}?q=${encodeURIComponent(query)}`)
+            .then(response => response.json())
+            .then(data => {
+                resultsContainer.innerHTML = '';
+                if (data.locations && data.locations.length > 0) {
+                    data.locations.forEach(location => {
+                        const item = document.createElement('a');
+                        item.href = '#';
+                        item.className = 'list-group-item list-group-item-action';
+                        item.textContent = location.name;
+                        item.addEventListener('click', (e) => {
+                            e.preventDefault();
+                            onSelectCallback(location.location_id, location.name);
+                            resultsContainer.innerHTML = '';
+                        });
+                        resultsContainer.appendChild(item);
+                    });
+                } else {
+                    resultsContainer.innerHTML = '<div class="list-group-item disabled">No results found</div>';
+                }
+            })
+            .catch(error => console.error('Error fetching location suggestions:', error));
+    }
+
+    if (startPointInput) {
+        startPointInput.addEventListener('input', function() {
+            selectedStartLocationId = null;
+            selectedStartLocationName = '';
+            selectedStartCoords = null;
+            displayLocationSuggestions(this.value, startPointResults, (locationId, locationName) => {
+                selectedStartLocationId = locationId;
+                selectedStartLocationName = locationName;
+                startPointInput.value = locationName;
+                const useCurrentChk = document.getElementById('useCurrentLocationCheck');
+                if(useCurrentChk) useCurrentChk.checked = false;
+                startPointInput.disabled = false;
+            });
+        });
+    }
+
+    if (destinationPointInput) {
+        destinationPointInput.addEventListener('input', function() {
+            selectedEndLocationId = null;
+            selectedEndLocationName = '';
+            selectedEndCoords = null;
+            displayLocationSuggestions(this.value, destinationPointResults, (locationId, locationName) => {
+                selectedEndLocationId = locationId;
+                selectedEndLocationName = locationName;
+                destinationPointInput.value = locationName;
+            });
+        });
+    }
+
+    const useCurrentLocationCheck = document.getElementById('useCurrentLocationCheck');
+    if (useCurrentLocationCheck) {
+        useCurrentLocationCheck.addEventListener('change', function() {
+            if (this.checked) {
+                startPointInput.disabled = true;
+                startPointInput.value = "Using current location";
+                selectedStartLocationId = null;
+                selectedStartLocationName = "Current Location";
+                selectedStartCoords = null;
+                startPointResults.innerHTML = '';
+            } else {
+                startPointInput.disabled = false;
+                if (startPointInput.value === "Using current location") startPointInput.value = "";
+            }
+        });
+    }
+
+    const getDirectionsButton = document.getElementById('getDirectionsButton');
+    if (getDirectionsButton) {
+        getDirectionsButton.addEventListener('click', function() {
+            const startSelected = selectedStartLocationId || selectedStartCoords || (useCurrentLocationCheck && useCurrentLocationCheck.checked);
+            const endSelected = selectedEndLocationId || selectedEndCoords;
+
+            if (!endSelected) { alert("Please select a destination point."); return; }
+            if (!startSelected) { alert("Please select a start point."); return; }
+
+            let navigationParams = {};
+            if (selectedEndCoords) {
+                navigationParams.to_latitude = selectedEndCoords.lat;
+                navigationParams.to_longitude = selectedEndCoords.lon;
+                navigationParams.to_name = `Map Pin: ${selectedEndCoords.lat.toFixed(5)}, ${selectedEndCoords.lon.toFixed(5)}`;
+            } else if (selectedEndLocationId) {
+                navigationParams.to_id = selectedEndLocationId;
+                navigationParams.to_name = selectedEndLocationName;
+            }
+
+            if (useCurrentLocationCheck && useCurrentLocationCheck.checked) {
+                getOriginForNavigation(function(origin) {
+                    if (origin.type === 'error') { alert(`Could not determine current location: ${origin.message}`); return; }
+                    if (origin.type === 'coords') {
+                        navigationParams.from_latitude = origin.lat;
+                        navigationParams.from_longitude = origin.lon;
+                        navigationParams.from_name = "Current Location";
+                    } else {
+                        navigationParams.from_id = origin.id;
+                        navigationParams.from_name = origin.from;
+                    }
+                    fetchAndDisplayRoute(navigationParams);
+                });
+            } else if (selectedStartCoords) {
+                navigationParams.from_latitude = selectedStartCoords.lat;
+                navigationParams.from_longitude = selectedStartCoords.lon;
+                navigationParams.from_name = `Map Pin: ${selectedStartCoords.lat.toFixed(5)}, ${selectedStartCoords.lon.toFixed(5)}`;
+                fetchAndDisplayRoute(navigationParams);
+            } else if (selectedStartLocationId) {
+                navigationParams.from_id = selectedStartLocationId;
+                navigationParams.from_name = selectedStartLocationName;
+                fetchAndDisplayRoute(navigationParams);
+            }
+        });
     }
 }
 
@@ -363,181 +576,7 @@ function getClosestPointOnPolyline(polyline, latLng) {
     return closestPoint || latLng;
 }
 
-document.addEventListener('DOMContentLoaded', function() {
-    if (!mapInstance && DYNAMIC_MAP_ID_FROM_DJANGO) {
-        if(window[DYNAMIC_MAP_ID_FROM_DJANGO] && typeof window[DYNAMIC_MAP_ID_FROM_DJANGO].getCenter === 'function') {
-            mapInstance = window[DYNAMIC_MAP_ID_FROM_DJANGO];
-            if (!isWatchingPosition && mapInstance) {
-                 startWatchingPosition();
-                 loadAndDisplayGeofences();
-            }
-        }
-    } else if (mapInstance) {
-        if (!isWatchingPosition) startWatchingPosition();
-    }
-
-    const followMeButton = document.getElementById('toggleFollowMe');
-    if (followMeButton) followMeButton.addEventListener('click', toggleFollowMeMode);
-
-    const searchInput = document.getElementById('searchInput');
-    if (searchInput) {
-        searchInput.addEventListener('input', function() {
-            const query = this.value.trim();
-            const resultsContainer = document.getElementById('searchResults');
-            if (query.length >= 2) {
-                fetch(`${SEARCH_LOCATIONS_URL}?q=${encodeURIComponent(query)}`)
-                    .then(response => response.json())
-                    .then(data => {
-                        resultsContainer.innerHTML = '';
-                        if (data.locations.length > 0) {
-                            data.locations.forEach(location => {
-                                const item = document.createElement('a');
-                                item.href = '#';
-                                item.className = 'list-group-item list-group-item-action';
-                                item.innerHTML = `<h6>${location.name}</h6><small class="text-muted">${location.location_type}</small><p class="mb-1">${location.description || ''}</p>`;
-                                item.addEventListener('click', (e) => {
-                                    e.preventDefault();
-                                    showLocation(location.location_id);
-                                });
-                                resultsContainer.appendChild(item);
-                            });
-                        } else {
-                            resultsContainer.innerHTML = '<div class="list-group-item">No results found</div>';
-                        }
-                    });
-            } else {
-                 resultsContainer.innerHTML = '';
-            }
-        });
-    }
-
-    const searchForm = document.getElementById('searchForm');
-    if (searchForm) searchForm.addEventListener('submit', (e) => e.preventDefault());
-
-    const startPointInput = document.getElementById('startPointInput');
-    const startPointResults = document.getElementById('startPointResults');
-    const destinationPointInput = document.getElementById('destinationPointInput');
-    const destinationPointResults = document.getElementById('destinationPointResults');
-
-    function displayLocationSuggestions(query, resultsContainer, onSelectCallback) {
-        if (query.length < 2) {
-            resultsContainer.innerHTML = ''; return;
-        }
-        fetch(`${SEARCH_LOCATIONS_URL}?q=${encodeURIComponent(query)}`)
-            .then(response => response.json())
-            .then(data => {
-                resultsContainer.innerHTML = '';
-                if (data.locations && data.locations.length > 0) {
-                    data.locations.forEach(location => {
-                        const item = document.createElement('a');
-                        item.href = '#';
-                        item.className = 'list-group-item list-group-item-action';
-                        item.textContent = location.name;
-                        item.addEventListener('click', (e) => {
-                            e.preventDefault();
-                            onSelectCallback(location.location_id, location.name);
-                            resultsContainer.innerHTML = '';
-                        });
-                        resultsContainer.appendChild(item);
-                    });
-                } else {
-                    resultsContainer.innerHTML = '<div class="list-group-item disabled">No results found</div>';
-                }
-            })
-            .catch(error => console.error('Error fetching location suggestions:', error));
-    }
-
-    if (startPointInput) {
-        startPointInput.addEventListener('input', function() {
-            selectedStartLocationId = null;
-            selectedStartLocationName = '';
-            selectedStartCoords = null;
-            displayLocationSuggestions(this.value, startPointResults, (locationId, locationName) => {
-                selectedStartLocationId = locationId;
-                selectedStartLocationName = locationName;
-                startPointInput.value = locationName;
-                const useCurrentChk = document.getElementById('useCurrentLocationCheck');
-                if(useCurrentChk) useCurrentChk.checked = false;
-                startPointInput.disabled = false;
-            });
-        });
-    }
-
-    if (destinationPointInput) {
-        destinationPointInput.addEventListener('input', function() {
-            selectedEndLocationId = null;
-            selectedEndLocationName = '';
-            selectedEndCoords = null;
-            displayLocationSuggestions(this.value, destinationPointResults, (locationId, locationName) => {
-                selectedEndLocationId = locationId;
-                selectedEndLocationName = locationName;
-                destinationPointInput.value = locationName;
-            });
-        });
-    }
-
-    const useCurrentLocationCheck = document.getElementById('useCurrentLocationCheck');
-    if (useCurrentLocationCheck) {
-        useCurrentLocationCheck.addEventListener('change', function() {
-            if (this.checked) {
-                startPointInput.disabled = true;
-                startPointInput.value = "Using current location";
-                selectedStartLocationId = null;
-                selectedStartLocationName = "Current Location";
-                selectedStartCoords = null;
-                startPointResults.innerHTML = '';
-            } else {
-                startPointInput.disabled = false;
-                if (startPointInput.value === "Using current location") startPointInput.value = "";
-            }
-        });
-    }
-
-    const getDirectionsButton = document.getElementById('getDirectionsButton');
-    if (getDirectionsButton) {
-        getDirectionsButton.addEventListener('click', function() {
-            const startSelected = selectedStartLocationId || selectedStartCoords || (useCurrentLocationCheck && useCurrentLocationCheck.checked);
-            const endSelected = selectedEndLocationId || selectedEndCoords;
-
-            if (!endSelected) { alert("Please select a destination point."); return; }
-            if (!startSelected) { alert("Please select a start point."); return; }
-
-            let navigationParams = {};
-            if (selectedEndCoords) {
-                navigationParams.to_latitude = selectedEndCoords.lat;
-                navigationParams.to_longitude = selectedEndCoords.lon;
-                navigationParams.to_name = `Map Pin: ${selectedEndCoords.lat.toFixed(5)}, ${selectedEndCoords.lon.toFixed(5)}`;
-            } else if (selectedEndLocationId) {
-                navigationParams.to_id = selectedEndLocationId;
-                navigationParams.to_name = selectedEndLocationName;
-            }
-
-            if (useCurrentLocationCheck && useCurrentLocationCheck.checked) {
-                getOriginForNavigation(function(origin) {
-                    if (origin.type === 'error') { alert(`Could not determine current location: ${origin.message}`); return; }
-                    if (origin.type === 'coords') {
-                        navigationParams.from_latitude = origin.lat;
-                        navigationParams.from_longitude = origin.lon;
-                        navigationParams.from_name = "Current Location";
-                    } else {
-                        navigationParams.from_id = origin.id;
-                        navigationParams.from_name = origin.from;
-                    }
-                    fetchAndDisplayRoute(navigationParams);
-                });
-            } else if (selectedStartCoords) {
-                navigationParams.from_latitude = selectedStartCoords.lat;
-                navigationParams.from_longitude = selectedStartCoords.lon;
-                navigationParams.from_name = `Map Pin: ${selectedStartCoords.lat.toFixed(5)}, ${selectedStartCoords.lon.toFixed(5)}`;
-                fetchAndDisplayRoute(navigationParams);
-            } else if (selectedStartLocationId) {
-                navigationParams.from_id = selectedStartLocationId;
-                navigationParams.from_name = selectedStartLocationName;
-                fetchAndDisplayRoute(navigationParams);
-            }
-        });
-    }
-});
+// Remove the old document.addEventListener('DOMContentLoaded', function() { ... }); block entirely.
 
 function ensureMapInstance() {
     if (!mapInstance) {
