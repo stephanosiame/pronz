@@ -1,8 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
 <graphml xmlns="http://graphml.graphdrawing.org/xmlns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd">
-<<<<<<< HEAD
-  <graph edgedefault="directed" />
-=======
   <key id="d17" for="edge" attr.name="tunnel" attr.type="string" />
   <key id="d16" for="edge" attr.name="width" attr.type="string" />
   <key id="d15" for="edge" attr.name="geometry" attr.type="string" />
@@ -1302,7 +1299,7 @@
     </edge>
     <edge source="5112808314" target="5254383189" id="0">
       <data key="d7">[525593760, 32708068]</data>
-      <data key="d8">['footway', 'residential']</data>
+      <data key="d8">['residential', 'footway']</data>
       <data key="d11">False</data>
       <data key="d13">[False, True]</data>
       <data key="d14">478.49611448039303</data>
@@ -1438,7 +1435,7 @@
     </edge>
     <edge source="5254383189" target="5112808314" id="0">
       <data key="d7">[525593760, 32708068]</data>
-      <data key="d8">['footway', 'residential']</data>
+      <data key="d8">['residential', 'footway']</data>
       <data key="d10">Wizara Street</data>
       <data key="d11">False</data>
       <data key="d16">6</data>
@@ -2148,10 +2145,9 @@
       <data key="d14">73.0340444887267</data>
       <data key="d15">LINESTRING (39.2369632 -6.7722341, 39.2370728 -6.7720809, 39.2371693 -6.7719557, 39.2373088 -6.7718118, 39.2373812 -6.7717266)</data>
     </edge>
-    <data key="d0">2025-06-11 19:17:36</data>
-    <data key="d1">OSMnx 2.0.4</data>
+    <data key="d0">2025-06-12 04:14:13</data>
+    <data key="d1">OSMnx 2.0.3</data>
     <data key="d2">epsg:4326</data>
     <data key="d3">True</data>
   </graph>
->>>>>>> 10b11d13a372277b158232b5c24ea359d3c68981
 </graphml>
