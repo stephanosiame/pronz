@@ -369,8 +369,39 @@ def calculate_route(from_location=None, to_location=None, transport_mode='walkin
         route_data['duration'] = int(current_duration)
         route_data['estimated_time'] = int(current_duration / 60) if current_duration != float('inf') else float('inf')
 
-    logger.debug(f"Returning route_data: {route_data}")
-    return route_data
+    logger.debug(f"Original route_data calculated: {route_data}")
+
+    # Adapt to Leaflet Routing Machine IRoute format
+    lrm_instructions = []
+    for step in route_data.get('steps', []):
+        lrm_instructions.append({
+            'text': step.get('instruction', ''),
+            'distance': step.get('distance', 0), # Ensure this is 'distance' from your step
+            'time': step.get('duration', 0)    # Ensure this is 'duration' from your step (in seconds)
+        })
+
+    lrm_summary = {
+        'totalDistance': route_data.get('distance', 0),       # Already in meters
+        'totalTime': route_data.get('duration', 0)            # Already in seconds
+    }
+
+    # Waypoints for LRM: needs actual start and end coordinates used for routing
+    # These were derived from from_location/to_location or from_coordinates/to_coordinates
+    # origin_point and dest_point are GEOS Points (lon, lat)
+    lrm_from_coords = [origin_point.y, origin_point.x] if origin_point else [] # lat, lon
+    lrm_to_coords = [dest_point.y, dest_point.x] if dest_point else []       # lat, lon
+
+    lrm_route = {
+        'name': f"Route from {origin_name} to {dest_name}", # Using names derived earlier
+        'summary': lrm_summary,
+        'coordinates': route_data.get('path', []), # Already list of [lat, lon]
+        'waypoints': [lrm_from_coords, lrm_to_coords],
+        'instructions': lrm_instructions
+    }
+
+    logger.info(f"Adapted route for LRM: {lrm_route['name']}, waypoints: {lrm_route['waypoints']}")
+    return [lrm_route] # Return as a list of routes
+
 
 def generate_random_route(from_point, to_point):
     """Generate a random route with intermediate points (for demo purposes)"""

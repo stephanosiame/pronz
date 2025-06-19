@@ -606,7 +606,9 @@ def get_directions(request):
                  logger.error("Route calculation resulted in empty route_data without raising specific ValueError.")
                  return JsonResponse({'success': False, 'error': 'Failed to calculate route due to an unexpected issue.'}, status=500)
 
-            return JsonResponse({'success': True, 'route': route_data})
+            # Ensure route_data is a list, as expected by LRM (calculate_route now returns a list)
+            # The key in JsonResponse is changed from 'route' to 'routes'
+            return JsonResponse({'success': True, 'routes': route_data})
 
         except Location.DoesNotExist:
             logger.warning(f"Location.DoesNotExist in get_directions for user {request.user.id}")
