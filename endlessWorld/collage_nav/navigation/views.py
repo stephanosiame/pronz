@@ -14,6 +14,7 @@ from django.contrib.gis.db.models.functions import Distance as DistanceFunction
 from django.utils import timezone
 from datetime import datetime, timedelta
 import json
+import logging # Added
 from django.core.serializers import serialize
 import random
 import string
@@ -22,6 +23,9 @@ from folium import plugins
 from .models import *
 from .forms import *
 from .utils import send_sms, calculate_route
+
+# Logger instance
+logger = logging.getLogger(__name__)
 
 # --- Constants for CoICT Campus Boundaries ---
 COICT_CENTER_LAT = -6.771204359255421
@@ -547,20 +551,39 @@ def get_directions(request):
                 }, status=400)
 
             # Calculate route
-            route_data = calculate_route(
-                from_location=from_location_obj,
-                to_location=to_location_obj,
-                transport_mode=transport_mode,
-                from_coordinates=from_coords_tuple,
-                to_coordinates=to_coords_tuple
-            )
-            
-            # Add boundary validation flag to response
-            route_data['boundary_validated'] = True
+            route_data = {} # Initialize route_data
+            try:
+                route_data = calculate_route(
+                    from_location=from_location_obj,
+                    to_location=to_location_obj,
+                    transport_mode=transport_mode,
+                    from_coordinates=from_coords_tuple,
+                    to_coordinates=to_coords_tuple
+                )
+            except ValueError as ve:
+                error_message = str(ve)
+                logger.error(f"ValueError from calculate_route in get_directions: {error_message}")
+                if "map data is currently unavailable or empty" in error_message:
+                    return JsonResponse({
+                        'success': False,
+                        'error': 'CoICT campus map data is currently unavailable. Please try again later.'
+                    }, status=503)
+                elif "No path found" in error_message or "Could not snap start/end points" in error_message:
+                    return JsonResponse({
+                        'success': False,
+                        'error': error_message # Use the message from the exception
+                    }, status=400)
+                else:
+                    # Generic ValueErrors from calculate_route if any other, or re-raise if preferred
+                    return JsonResponse({'success': False, 'error': error_message}, status=400)
+
+            # Add boundary validation flag to response (if route_data was populated)
+            if route_data: # Ensure route_data is not empty from a caught exception above
+                route_data['boundary_validated'] = True
             route_data['campus_area'] = 'CoICT'
             
             # Analytics and SMS sending logic
-            if from_location_obj and to_location_obj:
+            if from_location_obj and to_location_obj and route_data: # Check route_data again
                 RouteRequest.objects.create(
                     user=request.user,
                     from_location=from_location_obj,
@@ -568,9 +591,9 @@ def get_directions(request):
                     transport_mode=transport_mode,
                     timestamp=timezone.now()
                 )
-                if request.user.notifications_enabled and route_data.get('distance', 0) > 500:  # Lowered threshold for campus
-                    message = f"Campus route to {to_location_obj.name} is {route_data['distance']:.0f}m. Estimated time: {route_data['duration']} minutes."
-                    send_sms(request.user.phone_number, message)
+                if request.user.notifications_enabled and route_data.get('distance', 0) > 500:
+                    message = f"Campus route to {to_location_obj.name} is {route_data.get('distance', 0):.0f}m. Estimated time: {route_data.get('estimated_time', 0)} minutes."
+                    send_sms(request.user.phone_number, message) # type: ignore
                     SMSAlert.objects.create(
                         user=request.user, 
                         message=message, 
@@ -579,81 +602,84 @@ def get_directions(request):
                         sent_at=timezone.now()
                     )
 
+            if not route_data: # Should have been handled by specific ValueError catch, but as a safeguard
+                 logger.error("Route calculation resulted in empty route_data without raising specific ValueError.")
+                 return JsonResponse({'success': False, 'error': 'Failed to calculate route due to an unexpected issue.'}, status=500)
+
             return JsonResponse({'success': True, 'route': route_data})
 
         except Location.DoesNotExist:
-            return JsonResponse({'success': False, 'error': 'Location not found within campus boundary'}, status=404)
-        except ValueError as ve:
+            logger.warning(f"Location.DoesNotExist in get_directions for user {request.user.id}")
+            return JsonResponse({'success': False, 'error': 'Origin or destination location not found within campus boundary.'}, status=404)
+        except ValueError as ve: # Catches ValueErrors raised BEFORE calculate_route (e.g., param validation)
+            logger.warning(f"ValueError before calculate_route in get_directions: {str(ve)}")
             return JsonResponse({'success': False, 'error': str(ve)}, status=400)
         except Exception as e:
-            print(f"Unexpected error in get_directions: {e}")
-            return JsonResponse({'success': False, 'error': 'An unexpected error occurred. Please try again.'}, status=500)
+            logger.error(f"Unexpected error in get_directions for user {request.user.id}: {e}", exc_info=True)
+            return JsonResponse({'success': False, 'error': 'An unexpected server error occurred. Please try again.'}, status=500)
     
     return JsonResponse({'success': False, 'error': 'Invalid request method. Please use POST.'}, status=405)
 
 @login_required
-def update_location(request):
+def update_location(request): # type: ignore
     """Update user's current location with boundary validation"""
     if request.method == 'POST':
-        data = json.loads(request.body)
+        data = json.loads(request.body) # type: ignore
         latitude = data.get('latitude')
         longitude = data.get('longitude')
-        accuracy = data.get('accuracy', 0)
+        accuracy = data.get('accuracy', 0.0) # Default to 0.0 if not provided
         
-        if latitude and longitude:
-            location = Point(longitude, latitude, srid=4326)
-            
-            # Check if location is within COICT boundary
+        if latitude is not None and longitude is not None:
+            try:
+                location = Point(float(longitude), float(latitude), srid=4326)
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid coordinate format received in update_location: lat={latitude}, lon={longitude}")
+                return JsonResponse({'success': False, 'error': 'Invalid coordinate format.'}, status=400)
+
             if not is_within_coict_boundary(location):
                 return JsonResponse({
                     'success': False,
-                    'error': 'Location is outside CoICT campus boundary',
+                    'error': 'Location is outside CoICT campus boundary.',
                     'boundary_violation': True,
-                    'message': 'Your location must be within CoICT campus to use this service'
-                })
+                    'message': 'Your location must be within CoICT campus to use this service.'
+                }, status=400) # Status 400 for client error
             
-            # Save user location
-            user_location = UserLocation.objects.create(
-                user=request.user,
+            UserLocation.objects.create(
+                user=request.user, # type: ignore
                 location=location,
-                accuracy=accuracy,
+                accuracy=float(accuracy),
                 timestamp=timezone.now()
             )
             
-            # Check geofences for alerts (only within boundary)
-            check_geofences(request.user, location)
+            check_geofences(request.user, location) # type: ignore
             
-            # Clean up old location records (keep only last 50)
-            old_locations = UserLocation.objects.filter(
-                user=request.user
-            ).order_by('-timestamp')[50:]
-            
-            if old_locations:
-                UserLocation.objects.filter(
-                    id__in=[loc.id for loc in old_locations]
-                ).delete()
+            # Clean up old location records
+            old_locations_qs = UserLocation.objects.filter(user=request.user).order_by('-timestamp') # type: ignore
+            ids_to_delete = list(old_locations_qs.values_list('id', flat=True)[50:])
+            if ids_to_delete:
+                UserLocation.objects.filter(id__in=ids_to_delete).delete()
             
             return JsonResponse({
                 'success': True,
-                'message': 'Location updated successfully within CoICT campus',
+                'message': 'Location updated successfully within CoICT campus.',
                 'within_boundary': True
             })
+        else:
+            logger.warning("Missing latitude or longitude in update_location request.")
+            return JsonResponse({'success': False, 'error': 'Missing latitude or longitude.'}, status=400)
     
-    return JsonResponse({
-        'success': False,
-        'error': 'Invalid location data'
-    })
+    return JsonResponse({'success': False, 'error': 'Invalid request method. Please use POST.'}, status=405)
 
-def check_geofences(user, location):
+
+def check_geofences(user, location: Point):
     """Check geofences only within COICT boundary"""
-    # Only check geofences that are within the boundary
     active_geofences = Geofence.objects.filter(
         is_active=True,
-        boundary__within=COICT_BOUNDARY_POLYGON
+        boundary__within=COICT_BOUNDARY_POLYGON # type: ignore
     )
     
     for geofence in active_geofences:
-        is_inside = geofence.boundary.contains(location)
+        is_inside = geofence.boundary.contains(location) # type: ignore
         
         last_status = GeofenceEntry.objects.filter(
             user=user,
@@ -664,479 +690,395 @@ def check_geofences(user, location):
             if geofence.trigger_type in ['entry', 'both']:
                 message = f"Welcome to {geofence.name} at CoICT! {geofence.description}"
                 
-                if user.notifications_enabled:
-                    send_sms(user.phone_number, message)
+                if user.notifications_enabled: # type: ignore
+                    send_sms(user.phone_number, message) # type: ignore
                     SMSAlert.objects.create(
-                        user=user,
-                        message=message,
-                        alert_type='geofence_entry',
-                        is_sent=True,
-                        sent_at=timezone.now()
+                        user=user, message=message, alert_type='geofence_entry',
+                        is_sent=True, sent_at=timezone.now()
                     )
-                
                 GeofenceEntry.objects.create(
-                    user=user,
-                    geofence=geofence,
-                    is_inside=True,
-                    timestamp=timezone.now()
+                    user=user, geofence=geofence, is_inside=True, timestamp=timezone.now()
                 )
-                
         elif not is_inside and last_status and last_status.is_inside:
             if geofence.trigger_type in ['exit', 'both']:
                 message = f"You have left {geofence.name} at CoICT. Thank you for visiting!"
-                
-                if user.notifications_enabled:
-                    send_sms(user.phone_number, message)
+                if user.notifications_enabled: # type: ignore
+                    send_sms(user.phone_number, message) # type: ignore
                     SMSAlert.objects.create(
-                        user=user,
-                        message=message,
-                        alert_type='geofence_exit',
-                        is_sent=True,
-                        sent_at=timezone.now()
+                        user=user, message=message, alert_type='geofence_exit',
+                        is_sent=True, sent_at=timezone.now()
                     )
-                
                 GeofenceEntry.objects.create(
-                    user=user,
-                    geofence=geofence,
-                    is_inside=False,
-                    timestamp=timezone.now()
+                    user=user, geofence=geofence, is_inside=False, timestamp=timezone.now()
                 )
 
 @login_required
-def get_last_user_location(request):
+def get_last_user_location(request): # type: ignore
     """Get last user location within boundary"""
     if request.method == 'GET':
         try:
-            # Get recent locations and find the first one within boundary
-            recent_locations = UserLocation.objects.filter(user=request.user).order_by('-timestamp')[:10]
+            recent_locations = UserLocation.objects.filter(user=request.user).order_by('-timestamp')[:10] # type: ignore
             
-            for location_obj in recent_locations:
-                if location_obj.location and is_within_coict_boundary(location_obj.location):
+            for loc_obj in recent_locations:
+                if loc_obj.location and is_within_coict_boundary(loc_obj.location):
                     return JsonResponse({
                         'success': True,
-                        'latitude': location_obj.location.y,
-                        'longitude': location_obj.location.x,
-                        'timestamp': location_obj.timestamp,
+                        'latitude': loc_obj.location.y,
+                        'longitude': loc_obj.location.x,
+                        'timestamp': loc_obj.timestamp.isoformat(), # Use ISO format
                         'within_boundary': True
                     })
             
             return JsonResponse({
                 'success': False, 
-                'message': 'No location history found within CoICT campus boundary',
+                'error': 'No location history found within CoICT campus boundary.',
                 'boundary_violation': True
-            })
+            }, status=404) # 404 if no valid location found
             
-        except UserLocation.DoesNotExist:
-            return JsonResponse({
-                'success': False, 
-                'message': 'No location history found for this user'
-            })
+        except UserLocation.DoesNotExist: # Should not happen with filter().first() or slicing
+            logger.warning(f"UserLocation.DoesNotExist unexpectedly in get_last_user_location for user {request.user.id}") # type: ignore
+            return JsonResponse({'success': False, 'error': 'No location history found.'}, status=404)
         except Exception as e:
-            print(f"Error in get_last_user_location: {e}")
-            return JsonResponse({
-                'success': False, 
-                'message': 'An error occurred while fetching last location'
-            }, status=500)
-    else:
-        return JsonResponse({
-            'success': False, 
-            'message': 'Invalid request method. Only GET is allowed'
-        }, status=405)
+            logger.error(f"Error in get_last_user_location for user {request.user.id}: {e}", exc_info=True) # type: ignore
+            return JsonResponse({'success': False, 'error': 'An unexpected server error occurred.'}, status=500)
+
+    return JsonResponse({'success': False, 'error': 'Invalid request method. Please use GET.'}, status=405)
+
 
 @login_required
-def get_location_details_json(request, location_id):
+def get_location_details_json(request, location_id): # type: ignore
     """Return location details only if within boundary"""
     try:
-        location = get_object_or_404(Location, location_id=location_id)
+        location = get_object_or_404(Location, location_id=location_id) # type: ignore
         
-        if not location.coordinates:
-            return JsonResponse({'success': False, 'error': 'Location has no coordinates'})
+        if not location.coordinates: # type: ignore
+            logger.warning(f"Location {location_id} has no coordinates.")
+            return JsonResponse({'success': False, 'error': 'Location has no coordinates.'}, status=404)
             
-        if not is_within_coict_boundary(location.coordinates):
+        if not is_within_coict_boundary(location.coordinates): # type: ignore
+            logger.warning(f"Location {location_id} is outside CoICT boundary.")
             return JsonResponse({
                 'success': False, 
-                'error': 'Location is outside CoICT campus boundary'
-            })
+                'error': 'Location is outside CoICT campus boundary.'
+            }, status=400) # Client error as they requested a non-campus location
             
         return JsonResponse({
             'success': True,
-            'name': location.name,
-            'latitude': location.coordinates.y,
-            'longitude': location.coordinates.x,
+            'name': location.name, # type: ignore
+            'latitude': location.coordinates.y, # type: ignore
+            'longitude': location.coordinates.x, # type: ignore
             'within_boundary': True,
-            'location_type': location.get_location_type_display(),
-            'description': location.description or 'No description available'
+            'location_type': location.get_location_type_display(), # type: ignore
+            'description': location.description or 'No description available' # type: ignore
         })
         
-    except Location.DoesNotExist:
-        return JsonResponse({'success': False, 'error': 'Location not found'})
+    except Location.DoesNotExist: # type: ignore
+        logger.warning(f"Location {location_id} not found in get_location_details_json.")
+        return JsonResponse({'success': False, 'error': 'Location not found.'}, status=404)
     except Exception as e:
-        return JsonResponse({'success': False, 'error': str(e)})
+        logger.error(f"Error in get_location_details_json for {location_id}: {e}", exc_info=True)
+        return JsonResponse({'success': False, 'error': 'An unexpected server error occurred.'}, status=500)
 
 # Keep other views unchanged...
 @login_required
-def profile_view(request):
+def profile_view(request): # type: ignore
     """User profile management with enhanced features"""
+    user_instance = request.user # type: ignore
     if request.method == 'POST':
-        form = ProfileUpdateForm(request.POST, request.FILES, instance=request.user)
+        form = ProfileUpdateForm(request.POST, request.FILES, instance=user_instance) # type: ignore
         if form.is_valid():
             user = form.save()
             
-            if user.notifications_enabled:
-                message = f"Hi {user.first_name}! Your CoICT navigation profile has been updated successfully."
-                send_sms(user.phone_number, message)
+            if user.notifications_enabled: # type: ignore
+                message = f"Hi {user.first_name}! Your CoICT navigation profile has been updated successfully." # type: ignore
+                send_sms(user.phone_number, message) # type: ignore
                 
                 SMSAlert.objects.create(
-                    user=user,
-                    message=message,
-                    alert_type='profile_update',
-                    is_sent=True,
-                    sent_at=timezone.now()
+                    user=user, message=message, alert_type='profile_update',
+                    is_sent=True, sent_at=timezone.now()
                 )
             
-            messages.success(request, 'Profile updated successfully!')
-            return redirect('profile')
+            messages.success(request, 'Profile updated successfully!') # type: ignore
+            return redirect('profile') # type: ignore
     else:
-        form = ProfileUpdateForm(instance=request.user)
+        form = ProfileUpdateForm(instance=user_instance) # type: ignore
     
-    # Get user statistics
     user_stats = {
-        'total_searches': UserSearch.objects.filter(user=request.user).count(),
-        'total_routes': RouteRequest.objects.filter(user=request.user).count(),
-        'total_alerts': SMSAlert.objects.filter(user=request.user).count(),
-        'member_since': request.user.date_joined,
+        'total_searches': UserSearch.objects.filter(user=user_instance).count(),
+        'total_routes': RouteRequest.objects.filter(user=user_instance).count(),
+        'total_alerts': SMSAlert.objects.filter(user=user_instance).count(),
+        'member_since': user_instance.date_joined,
     }
     
-    return render(request, 'profile.html', {
+    return render(request, 'profile.html', { # type: ignore
         'form': form,
         'user_stats': user_stats
     })
 
-def password_reset_request(request):
+def password_reset_request(request): # type: ignore
     """Request password reset via SMS"""
     if request.method == 'POST':
-        form = PasswordResetRequestForm(request.POST)
+        form = PasswordResetRequestForm(request.POST) # type: ignore
         if form.is_valid():
-            phone_number = form.cleaned_data['phone_number']
+            phone_number = form.cleaned_data['phone_number'] # type: ignore
             
             try:
-                user = CustomUser.objects.get(phone_number=phone_number)
+                user = CustomUser.objects.get(phone_number=phone_number) # type: ignore
                 
-                # Generate reset token
                 reset_token = ''.join(random.choices(string.digits, k=6))
-                user.verification_token = reset_token
-                user.token_created_at = timezone.now()
-                user.save()
+                user.verification_token = reset_token # type: ignore
+                user.token_created_at = timezone.now() # type: ignore
+                user.save() # type: ignore
                 
-                # Send SMS
                 message = f"Password reset for College Navigation. Your reset code is: {reset_token}. This code expires in 15 minutes. If you didn't request this, please ignore."
-                sms_sent = send_sms(phone_number, message)
+                sms_sent = send_sms(phone_number, message) # type: ignore
                 
                 if sms_sent:
-                    SMSAlert.objects.create(
-                        user=user,
-                        message=message,
-                        alert_type='password_reset',
-                        is_sent=True,
-                        sent_at=timezone.now()
+                    SMSAlert.objects.create( # type: ignore
+                        user=user, message=message, alert_type='password_reset',
+                        is_sent=True, sent_at=timezone.now()
                     )
-                    messages.success(request, 'Reset code sent to your phone! Check your messages.')
-                    return redirect('password_reset_verify', user_id=user.id)
+                    messages.success(request, 'Reset code sent to your phone! Check your messages.') # type: ignore
+                    return redirect('password_reset_verify', user_id=user.id) # type: ignore
                 else:
-                    messages.error(request, 'Could not send SMS. Please try again or contact support.')
+                    messages.error(request, 'Could not send SMS. Please try again or contact support.') # type: ignore
                     
-            except CustomUser.DoesNotExist:
-                # Don't reveal if user exists or not for security
-                messages.success(request, 'If this phone number is registered, you will receive a reset code.')
+            except CustomUser.DoesNotExist: # type: ignore
+                messages.success(request, 'If this phone number is registered, you will receive a reset code.') # type: ignore
     else:
-        form = PasswordResetRequestForm()
+        form = PasswordResetRequestForm() # type: ignore
     
-    return render(request, 'password_reset_request.html', {'form': form})
+    return render(request, 'password_reset_request.html', {'form': form}) # type: ignore
 
-def password_reset_verify(request, user_id):
+def password_reset_verify(request, user_id): # type: ignore
     """Verify reset token and set new password"""
-    user = get_object_or_404(CustomUser, id=user_id)
+    user = get_object_or_404(CustomUser, id=user_id) # type: ignore
     
-    # Check if token is expired (15 minutes)
-    if user.token_created_at and timezone.now() > user.token_created_at + timedelta(minutes=15):
-        messages.error(request, 'Reset code has expired. Please request a new one.')
-        return redirect('password_reset_request')
+    if user.token_created_at and timezone.now() > user.token_created_at + timedelta(minutes=15): # type: ignore
+        messages.error(request, 'Reset code has expired. Please request a new one.') # type: ignore
+        return redirect('password_reset_request') # type: ignore
     
     if request.method == 'POST':
         token = request.POST.get('token')
         new_password = request.POST.get('new_password')
         confirm_password = request.POST.get('confirm_password')
         
-        if user.verification_token == token:
-            if new_password == confirm_password and len(new_password) >= 8:
-                user.set_password(new_password)
-                user.verification_token = None
-                user.token_created_at = None
-                user.save()
+        if user.verification_token == token: # type: ignore
+            if new_password == confirm_password and new_password and len(new_password) >= 8:
+                user.set_password(new_password) # type: ignore
+                user.verification_token = None # type: ignore
+                user.token_created_at = None # type: ignore
+                user.save() # type: ignore
                 
-                # Send confirmation SMS
-                message = f"Hi {user.first_name}! Your password has been reset successfully. If this wasn't you, please contact support immediately."
-                send_sms(user.phone_number, message)
+                message = f"Hi {user.first_name}! Your password has been reset successfully. If this wasn't you, please contact support immediately." # type: ignore
+                send_sms(user.phone_number, message) # type: ignore
                 
-                SMSAlert.objects.create(
-                    user=user,
-                    message=message,
-                    alert_type='password_changed',
-                    is_sent=True,
-                    sent_at=timezone.now()
+                SMSAlert.objects.create( # type: ignore
+                    user=user, message=message, alert_type='password_changed',
+                    is_sent=True, sent_at=timezone.now()
                 )
                 
-                messages.success(request, 'Password reset successfully! You can now log in with your new password.')
-                return redirect('login')
+                messages.success(request, 'Password reset successfully! You can now log in with your new password.') # type: ignore
+                return redirect('login') # type: ignore
             else:
-                messages.error(request, 'Passwords do not match or are too short (minimum 8 characters).')
+                messages.error(request, 'Passwords do not match or are too short (minimum 8 characters).') # type: ignore
         else:
-            messages.error(request, 'Invalid reset code. Please check and try again.')
+            messages.error(request, 'Invalid reset code. Please check and try again.') # type: ignore
     
-    return render(request, 'password_reset_verify.html', {'user': user})
+    return render(request, 'password_reset_verify.html', {'user': user}) # type: ignore
 
-def check_geofences(user, location):
-    """Check if user entered/exited any geofences and send alerts"""
-    active_geofences = Geofence.objects.filter(is_active=True)
+# This function is duplicated, removing one instance.
+# def check_geofences(user, location):
+#     """Check if user entered/exited any geofences and send alerts"""
+#     active_geofences = Geofence.objects.filter(is_active=True)
     
-    for geofence in active_geofences:
-        is_inside = geofence.boundary.contains(location)
+#     for geofence in active_geofences:
+#         is_inside = geofence.boundary.contains(location)
         
-        # Check if this is a new entry/exit
-        last_status = GeofenceEntry.objects.filter(
-            user=user,
-            geofence=geofence
-        ).order_by('-timestamp').first()
+#         last_status = GeofenceEntry.objects.filter(
+#             user=user,
+#             geofence=geofence
+#         ).order_by('-timestamp').first()
         
-        if is_inside and (not last_status or not last_status.is_inside):
-            # User entered geofence
-            if geofence.trigger_type in ['entry', 'both']:
-                message = f"Welcome to {geofence.name}! {geofence.description}"
-                
-                if user.notifications_enabled:
-                    send_sms(user.phone_number, message)
-                    
-                    SMSAlert.objects.create(
-                        user=user,
-                        message=message,
-                        alert_type='geofence_entry',
-                        is_sent=True,
-                        sent_at=timezone.now()
-                    )
-                
-                # Record the entry
-                GeofenceEntry.objects.create(
-                    user=user,
-                    geofence=geofence,
-                    is_inside=True,
-                    timestamp=timezone.now()
-                )
-                
-        elif not is_inside and last_status and last_status.is_inside:
-            # User exited geofence
-            if geofence.trigger_type in ['exit', 'both']:
-                message = f"You have left {geofence.name}. Thank you for visiting!"
-                
-                if user.notifications_enabled:
-                    send_sms(user.phone_number, message)
-                    
-                    SMSAlert.objects.create(
-                        user=user,
-                        message=message,
-                        alert_type='geofence_exit',
-                        is_sent=True,
-                        sent_at=timezone.now()
-                    )
-                
-                # Record the exit
-                GeofenceEntry.objects.create(
-                    user=user,
-                    geofence=geofence,
-                    is_inside=False,
-                    timestamp=timezone.now()
-                )
+#         if is_inside and (not last_status or not last_status.is_inside):
+#             if geofence.trigger_type in ['entry', 'both']:
+#                 message = f"Welcome to {geofence.name}! {geofence.description}"
+#                 if user.notifications_enabled:
+#                     send_sms(user.phone_number, message)
+#                     SMSAlert.objects.create(
+#                         user=user, message=message, alert_type='geofence_entry',
+#                         is_sent=True, sent_at=timezone.now()
+#                     )
+#                 GeofenceEntry.objects.create(
+#                     user=user, geofence=geofence, is_inside=True, timestamp=timezone.now()
+#                 )
+#         elif not is_inside and last_status and last_status.is_inside:
+#             if geofence.trigger_type in ['exit', 'both']:
+#                 message = f"You have left {geofence.name}. Thank you for visiting!"
+#                 if user.notifications_enabled:
+#                     send_sms(user.phone_number, message)
+#                     SMSAlert.objects.create(
+#                         user=user, message=message, alert_type='geofence_exit',
+#                         is_sent=True, sent_at=timezone.now()
+#                     )
+#                 GeofenceEntry.objects.create(
+#                     user=user, geofence=geofence, is_inside=False, timestamp=timezone.now()
+#                 )
 
 @login_required
-def update_preferences(request):
+def update_preferences(request): # type: ignore
     """Update user preferences (theme, notifications, etc.)"""
     if request.method == 'POST':
-        data = json.loads(request.body)
+        try:
+            data = json.loads(request.body) # type: ignore
+        except json.JSONDecodeError:
+            logger.warning("Invalid JSON in update_preferences request.")
+            return JsonResponse({'success': False, 'error': 'Invalid JSON format.'}, status=400)
         
-        user = request.user
-        user.theme_preference = data.get('theme', 'light')
-        user.map_zoom_level = data.get('zoom_level', 15)
-        user.notifications_enabled = data.get('notifications', True)
-        user.location_sharing = data.get('location_sharing', True)
-        user.save()
+        user = request.user # type: ignore
+        user.theme_preference = data.get('theme', user.theme_preference) # type: ignore
+        user.map_zoom_level = data.get('zoom_level', user.map_zoom_level) # type: ignore
+        user.notifications_enabled = data.get('notifications', user.notifications_enabled) # type: ignore
+        user.location_sharing = data.get('location_sharing', user.location_sharing) # type: ignore
+        user.save() # type: ignore
         
         return JsonResponse({
             'success': True,
-            'message': 'Preferences updated successfully'
+            'message': 'Preferences updated successfully.'
         })
     
-    return JsonResponse({'success': False})
+    return JsonResponse({'success': False, 'error': 'Invalid request method. Please use POST.'}, status=405)
 
-@login_required
-def get_location_details_json(request, location_id):
-    """Return location details (name, lat, lon) as JSON."""
-    try:
-        location = get_object_or_404(Location, location_id=location_id)
-        if location.coordinates:
-            return JsonResponse({
-                'success': True,
-                'name': location.name,
-                'latitude': location.coordinates.y,
-                'longitude': location.coordinates.x
-            })
-        else:
-            return JsonResponse({'success': False, 'error': 'Location has no coordinates.'})
-    except Location.DoesNotExist:
-        return JsonResponse({'success': False, 'error': 'Location not found.'})
-    except Exception as e:
-        return JsonResponse({'success': False, 'error': str(e)})
+# This function is duplicated. Removing one instance.
+# @login_required
+# def get_location_details_json(request, location_id):
+#     """Return location details (name, lat, lon) as JSON."""
+#     try:
+#         location = get_object_or_404(Location, location_id=location_id)
+#         if location.coordinates:
+#             return JsonResponse({
+#                 'success': True,
+#                 'name': location.name,
+#                 'latitude': location.coordinates.y,
+#                 'longitude': location.coordinates.x
+#             })
+#         else:
+#             return JsonResponse({'success': False, 'error': 'Location has no coordinates.'})
+#     except Location.DoesNotExist:
+#         return JsonResponse({'success': False, 'error': 'Location not found.'})
+#     except Exception as e:
+#         return JsonResponse({'success': False, 'error': str(e)})
 
 # Helper functions
-def get_smart_recommendations(user, nearby_locations, current_hour):
+def get_smart_recommendations(user, nearby_locations: list[Location], current_hour: int):
     """Generate smart recommendations based on time and user behavior"""
-    recommendations = []
     
-    # Time-based recommendations
-    if 7 <= current_hour <= 11:  # Morning
-        priority_types = ['library', 'cafeteria', 'lecture_hall']
-    elif 12 <= current_hour <= 14:  # Lunch time
-        priority_types = ['cafeteria', 'restaurant', 'food_court']
-    elif 15 <= current_hour <= 18:  # Afternoon
-        priority_types = ['library', 'study_room', 'lab']
-    else:  # Evening/Night
-        priority_types = ['dormitory', 'security', 'parking']
+    if 7 <= current_hour <= 11: priority_types = ['library', 'cafeteria', 'lecture_hall']
+    elif 12 <= current_hour <= 14: priority_types = ['cafeteria', 'restaurant', 'food_court']
+    elif 15 <= current_hour <= 18: priority_types = ['library', 'study_room', 'lab']
+    else: priority_types = ['dormitory', 'security', 'parking']
     
-    # Get recommendations based on priority types
-    # nearby_locations is a list of Location model instances.
-    raw_recommendations = [] # Temporary list to hold found/created recommendations
+    raw_recommendations = []
+    processed_loc_ids = set()
 
-    for location_type_filter in priority_types:
-        # Filter the list of Location objects using list comprehension
-        matching_location_objects = [
-            loc for loc in nearby_locations # nearby_locations is already the filtered list from dashboard_view
-            if loc.location_type == location_type_filter
-        ][:2] # Get the first 2 matches
+    for loc_type in priority_types:
+        # Filter from the provided nearby_locations list
+        matching_locations = [
+            loc for loc in nearby_locations
+            if loc.location_type == loc_type and loc.location_id not in processed_loc_ids
+        ]
+        for loc_obj in matching_locations[:2]: # Take up to 2 for this type
+            if loc_obj.location_id in processed_loc_ids:
+                continue # Should not happen if logic is correct, but safeguard
 
-        for loc_obj in matching_location_objects:
-            existing_recommendation = Recommendation.objects.filter(recommended_location=loc_obj).order_by('-created_at').first()
+            existing_rec = Recommendation.objects.filter(recommended_location=loc_obj).order_by('-created_at').first()
+            media_url = existing_rec.media_url if existing_rec and existing_rec.media_url else \
+                        (loc_obj.image.url if loc_obj.image and hasattr(loc_obj.image, 'url') else None)
 
-            if existing_recommendation:
-                # Use the existing Recommendation object's data
-                raw_recommendations.append({
-                    'recommended_location': loc_obj,
-                    'reason': existing_recommendation.reason,
-                    'rating': existing_recommendation.rating,
-                    'media_url': existing_recommendation.media_url,
-                    'description': loc_obj.description, # Add description from location object
-                    'location_type_display': loc_obj.get_location_type_display() # Add display name for type
-                })
-            else:
-                # Create a default dictionary if no specific Recommendation entry exists
-                # Attempt to get media_url from the location's image field if available
-                media_url_fallback = None
-                if loc_obj.image and hasattr(loc_obj.image, 'url'):
-                    media_url_fallback = loc_obj.image.url
+            raw_recommendations.append({
+                'recommended_location': loc_obj, # Keep the object for template access
+                'reason': existing_rec.reason if existing_rec else f'Popular {loc_obj.get_location_type_display()} nearby',
+                'rating': existing_rec.rating if existing_rec else 4.0,
+                'media_url': media_url,
+                'description': loc_obj.description or "No description available.",
+                'location_type_display': loc_obj.get_location_type_display()
+            })
+            processed_loc_ids.add(loc_obj.location_id)
+            if len(raw_recommendations) >= 6: break # Max 6 recommendations
+        if len(raw_recommendations) >= 6: break
 
-                raw_recommendations.append({
-                    'recommended_location': loc_obj,
-                    'reason': f'Popular {loc_obj.get_location_type_display()} nearby',
-                    'rating': 4.0,
-                    'media_url': media_url_fallback,
-                    'description': loc_obj.description,
-                    'location_type_display': loc_obj.get_location_type_display()
-                })
+    return raw_recommendations
 
-    # Limit to 6 recommendations. This structure is already a list of dicts.
-    return raw_recommendations[:6]
 
-def get_user_preferences(user):
+def get_user_preferences(user): # type: ignore
     """Get user preferences with defaults"""
     return {
-        'theme': getattr(user, 'theme_preference', 'light'),
-        'zoom_level': getattr(user, 'map_zoom_level', 15),
-        'notifications_enabled': getattr(user, 'notifications_enabled', True),
-        'location_sharing': getattr(user, 'location_sharing', True),
+        'theme': user.theme_preference if hasattr(user, 'theme_preference') else 'light', # type: ignore
+        'zoom_level': user.map_zoom_level if hasattr(user, 'map_zoom_level') else 15, # type: ignore
+        'notifications_enabled': user.notifications_enabled if hasattr(user, 'notifications_enabled') else True, # type: ignore
+        'location_sharing': user.location_sharing if hasattr(user, 'location_sharing') else True, # type: ignore
     }
 
 # --- Notification API Views ---
 
 @login_required
-def get_unread_notification_count(request):
-    # Count published notifications that the user hasn't read
-    published_notifications = AdminNotification.objects.filter(is_published=True)
-
+def get_unread_notification_count(request): # type: ignore
+    user = request.user # type: ignore
+    published_notifications = AdminNotification.objects.filter(is_published=True) # type: ignore
     unread_count = 0
     for notification in published_notifications:
-        status, created = UserNotificationStatus.objects.get_or_create(
-            user=request.user,
-            notification=notification
-            # Defaults to is_read=False, which is correct for unread logic
-        )
-        if not status.is_read:
+        status, _ = UserNotificationStatus.objects.get_or_create(user=user, notification=notification) # type: ignore
+        if not status.is_read: # type: ignore
             unread_count += 1
-
     return JsonResponse({'unread_count': unread_count})
 
 @login_required
-def get_notifications_list(request):
+def get_notifications_list(request): # type: ignore
+    user = request.user # type: ignore
     notifications_data = []
-    # Fetch latest 10 published notifications
-    recent_published_notifications = AdminNotification.objects.filter(is_published=True).order_by('-published_at', '-created_at')[:10]
+    recent_published_notifications = AdminNotification.objects.filter(is_published=True).order_by('-published_at', '-created_at')[:10] # type: ignore
 
     for notification in recent_published_notifications:
-        status, created = UserNotificationStatus.objects.get_or_create(
-            user=request.user,
-            notification=notification
-        )
+        status, _ = UserNotificationStatus.objects.get_or_create(user=user, notification=notification) # type: ignore
         notifications_data.append({
-            'id': notification.id,
-            'title': notification.title,
-            'message': notification.message,
-            'published_at': notification.published_at.strftime('%Y-%m-%d %H:%M') if notification.published_at else notification.created_at.strftime('%Y-%m-%d %H:%M'),
-            'is_read': status.is_read,
+            'id': notification.id, # type: ignore
+            'title': notification.title, # type: ignore
+            'message': notification.message, # type: ignore
+            'published_at': (notification.published_at or notification.created_at).strftime('%Y-%m-%d %H:%M'), # type: ignore
+            'is_read': status.is_read, # type: ignore
         })
     return JsonResponse({'notifications': notifications_data})
 
 @login_required
-@require_http_methods(["POST"]) # Use require_http_methods as it's already imported
-def mark_notification_as_read(request, notification_id):
+@require_http_methods(["POST"])
+def mark_notification_as_read(request, notification_id): # type: ignore
+    user = request.user # type: ignore
     try:
-        # Ensure the notification exists and is published before marking as read
-        notification = AdminNotification.objects.get(id=notification_id, is_published=True)
+        notification = AdminNotification.objects.get(id=notification_id, is_published=True) # type: ignore
+        status, _ = UserNotificationStatus.objects.get_or_create(user=user, notification=notification) # type: ignore
 
-        status, created = UserNotificationStatus.objects.get_or_create(
-            user=request.user,
-            notification=notification
-        )
-
-        if not status.is_read:
-            status.is_read = True
-            status.read_at = timezone.now()
-            status.save()
-
+        if not status.is_read: # type: ignore
+            status.is_read = True # type: ignore
+            status.read_at = timezone.now() # type: ignore
+            status.save() # type: ignore
         return JsonResponse({'success': True, 'message': 'Notification marked as read.'})
-    except AdminNotification.DoesNotExist:
+    except AdminNotification.DoesNotExist: # type: ignore
+        logger.warning(f"Attempt to mark non-existent/non-published notification {notification_id} as read by user {user.id}")
         return JsonResponse({'success': False, 'error': 'Notification not found or not published.'}, status=404)
     except Exception as e:
-        # Log the exception e for server-side debugging
-        # For example: print(f"Error in mark_notification_as_read: {e}")
-        return JsonResponse({'success': False, 'error': 'An internal error occurred.'}, status=500)
+        logger.error(f"Error in mark_notification_as_read for notif {notification_id}, user {user.id}: {e}", exc_info=True)
+        return JsonResponse({'success': False, 'error': 'An internal server error occurred.'}, status=500)
 
 @login_required
-def api_get_geofences(request):
-    active_geofences = Geofence.objects.filter(is_active=True)
-    # Serialize the boundary to GeoJSON directly if possible, or prepare a list of dicts
+def api_get_geofences(request): # type: ignore
+    active_geofences = Geofence.objects.filter(is_active=True) # type: ignore
     geofences_data = []
     for gf in active_geofences:
-        if gf.boundary: # Ensure boundary exists
+        if gf.boundary: # type: ignore
             geofences_data.append({
-                'id': gf.geofence_id,
-                'name': gf.name,
-                'description': gf.description,
-                'boundary_geojson': json.loads(gf.boundary.geojson) # Get GeoJSON directly
+                'id': gf.geofence_id, # type: ignore
+                'name': gf.name, # type: ignore
+                'description': gf.description, # type: ignore
+                'boundary_geojson': json.loads(gf.boundary.geojson) # type: ignore
             })
     return JsonResponse({'geofences': geofences_data})
