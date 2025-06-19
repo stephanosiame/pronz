@@ -1,5 +1,10 @@
 let mapInstance = null;
 
+// New global variables for manual route drawing
+let isDrawingManualRoute = false;
+let manualRoutePoints = [];
+let manualRoutePolyline = null;
+
 // These variables were global in dashboard.html, ensure they are accessible within this module
 // or passed as parameters where needed.
 let currentRoutePolyline = null;
@@ -66,6 +71,13 @@ window.initCustomMapLogic = function(generatedMapId) {
     } else {
         // Basic map event listeners
         mapInstance.on('click', function(e) {
+            if (isDrawingManualRoute) {
+                manualRoutePoints.push(e.latlng);
+                updateManualRoutePolyline();
+                // Prevent default click behavior (showing set start/destination popup)
+                return;
+            }
+            // Else (if not in drawing mode):
             if (followMeActive) {
                 toggleFollowMeMode();
                 console.log("Follow Me mode disabled due to map click.");
@@ -665,10 +677,23 @@ function fetchAndDisplayRoute(navigationParams) {
     }
 
     if (!ensureMapInstance()) { alert("Map is not available to display the route."); return; }
-    if (currentRoutePolyline && mapInstance.hasLayer(currentRoutePolyline)) mapInstance.removeLayer(currentRoutePolyline);
-    if (animatedNavigationMarker && mapInstance.hasLayer(animatedNavigationMarker)) mapInstance.removeLayer(animatedNavigationMarker);
+
+    // Clear existing routes (manual and automatic)
+    if (currentRoutePolyline && mapInstance.hasLayer(currentRoutePolyline)) {
+        mapInstance.removeLayer(currentRoutePolyline);
+    }
     currentRoutePolyline = null;
+
+    if (animatedNavigationMarker && mapInstance.hasLayer(animatedNavigationMarker)) {
+        mapInstance.removeLayer(animatedNavigationMarker);
+    }
     animatedNavigationMarker = null;
+
+    if (manualRoutePolyline && mapInstance.hasLayer(manualRoutePolyline)) {
+        mapInstance.removeLayer(manualRoutePolyline);
+    }
+    manualRoutePolyline = null;
+    manualRoutePoints = []; // Also reset points for manual route
 
     let fetchBody = {};
     if (navigationParams.to_id) fetchBody.to_id = navigationParams.to_id;
@@ -830,3 +855,174 @@ function loadAndDisplayGeofences() {
         })
         .catch(error => console.error("Error fetching or displaying geofences:", error));
 }
+
+// Functions for manual route drawing
+function startManualRouteDrawing() {
+    if (!ensureMapInstance()) { alert("Map is not available for drawing."); return; }
+    isDrawingManualRoute = true;
+    manualRoutePoints = [];
+
+    // Clear existing manual route polyline
+    if (manualRoutePolyline && mapInstance.hasLayer(manualRoutePolyline)) {
+        mapInstance.removeLayer(manualRoutePolyline);
+    }
+    manualRoutePolyline = null;
+
+    // Clear existing automatic route and its animation
+    if (currentRoutePolyline && mapInstance.hasLayer(currentRoutePolyline)) {
+        mapInstance.removeLayer(currentRoutePolyline);
+    }
+    currentRoutePolyline = null;
+    if (animatedNavigationMarker && mapInstance.hasLayer(animatedNavigationMarker)) {
+        mapInstance.removeLayer(animatedNavigationMarker);
+    }
+    animatedNavigationMarker = null;
+
+    // Optional: Change mouse cursor
+    if (mapInstance && mapInstance._container) {
+        mapInstance._container.style.cursor = 'crosshair';
+    }
+    // Button state handling
+    const startDrawBtn = document.getElementById('startDrawRouteBtn');
+    if (startDrawBtn) startDrawBtn.disabled = true;
+    const finishDrawBtn = document.getElementById('finishDrawRouteBtn');
+    if (finishDrawBtn) finishDrawBtn.disabled = false;
+    const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn');
+    if (cancelDrawBtn) cancelDrawBtn.disabled = false;
+
+    console.log("Manual route drawing started. Previous routes cleared.");
+}
+
+function updateManualRoutePolyline() {
+    if (!mapInstance) return;
+    if (manualRoutePolyline && mapInstance.hasLayer(manualRoutePolyline)) {
+        mapInstance.removeLayer(manualRoutePolyline);
+    }
+    if (manualRoutePoints.length >= 2) {
+        manualRoutePolyline = L.polyline(manualRoutePoints, {
+            color: 'red', // Distinctive color
+            weight: 4,
+            opacity: 0.7,
+            dashArray: '5, 10' // Dashed line
+        }).addTo(mapInstance);
+    }
+}
+
+function finishManualRouteDrawing() {
+    isDrawingManualRoute = false;
+    // Optional: Change mouse cursor back to default
+    if (mapInstance && mapInstance._container) {
+        mapInstance._container.style.cursor = '';
+    }
+    // Button state handling
+    const startDrawBtn = document.getElementById('startDrawRouteBtn');
+    if (startDrawBtn) startDrawBtn.disabled = false;
+    const finishDrawBtn = document.getElementById('finishDrawRouteBtn');
+    if (finishDrawBtn) finishDrawBtn.disabled = true; // Disable until next drawing session
+    const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn');
+    if (cancelDrawBtn) cancelDrawBtn.disabled = true; // Disable until next drawing session
+
+    console.log("Manual route drawing finished.");
+    // The manualRoutePolyline should remain on the map.
+    // Optional: if manualRoutePoints has less than 2 points, consider removing the polyline or alerting user.
+    if (manualRoutePoints.length < 2 && manualRoutePolyline && mapInstance.hasLayer(manualRoutePolyline)) {
+        mapInstance.removeLayer(manualRoutePolyline);
+        manualRoutePolyline = null;
+        console.log("Manual route drawing cancelled or insufficient points.");
+    }
+}
+
+// Expose functions to global scope for HTML buttons
+window.startManualRouteDrawing = startManualRouteDrawing;
+window.finishManualRouteDrawing = finishManualRouteDrawing;
+// It might be useful to have a cancel function as well
+window.cancelManualRouteDrawing = function() {
+    isDrawingManualRoute = false;
+    manualRoutePoints = [];
+    if (manualRoutePolyline && mapInstance && mapInstance.hasLayer(manualRoutePolyline)) {
+        mapInstance.removeLayer(manualRoutePolyline);
+    }
+    manualRoutePolyline = null;
+    if (mapInstance && mapInstance._container) {
+        mapInstance._container.style.cursor = '';
+    }
+    // Button state handling
+    const startDrawBtn = document.getElementById('startDrawRouteBtn');
+    if (startDrawBtn) startDrawBtn.disabled = false;
+    const finishDrawBtn = document.getElementById('finishDrawRouteBtn');
+    if (finishDrawBtn) finishDrawBtn.disabled = true;
+    const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn');
+    if (cancelDrawBtn) cancelDrawBtn.disabled = true;
+
+    console.log("Manual route drawing cancelled.");
+};
+
+// Optional but Good Practice: General function to clear all routes
+window.clearAllMapRoutes = function() {
+    if (!ensureMapInstance()) {
+        console.warn("Map not available to clear routes.");
+        return;
+    }
+
+    // Clear automatic route
+    if (currentRoutePolyline && mapInstance.hasLayer(currentRoutePolyline)) {
+        mapInstance.removeLayer(currentRoutePolyline);
+        console.log("Automatic route polyline cleared.");
+    }
+    currentRoutePolyline = null;
+
+    if (animatedNavigationMarker && mapInstance.hasLayer(animatedNavigationMarker)) {
+        mapInstance.removeLayer(animatedNavigationMarker);
+        console.log("Animated navigation marker cleared.");
+    }
+    animatedNavigationMarker = null;
+
+    // Clear manual route
+    if (manualRoutePolyline && mapInstance.hasLayer(manualRoutePolyline)) {
+        mapInstance.removeLayer(manualRoutePolyline);
+        console.log("Manual route polyline cleared.");
+    }
+    manualRoutePolyline = null;
+    manualRoutePoints = [];
+
+    // Optional: Clear other markers if desired (e.g., search results, clicked points)
+    // if (searchResultMarker && mapInstance.hasLayer(searchResultMarker)) {
+    //     mapInstance.removeLayer(searchResultMarker);
+    //     searchResultMarker = null;
+    // }
+    // if (clickedPointMarker && mapInstance.hasLayer(clickedPointMarker)) {
+    //     mapInstance.removeLayer(clickedPointMarker);
+    //     clickedPointMarker = null;
+    // }
+    // if (recommendationMarker && mapInstance.hasLayer(recommendationMarker)) {
+    //    mapInstance.removeLayer(recommendationMarker);
+    //    recommendationMarker = null;
+    // }
+    // Also ensure drawing mode is fully reset if active
+    isDrawingManualRoute = false;
+    if (mapInstance && mapInstance._container) {
+        mapInstance._container.style.cursor = ''; // Reset cursor
+    }
+    // Reset button states
+    const startDrawBtn = document.getElementById('startDrawRouteBtn');
+    if (startDrawBtn) startDrawBtn.disabled = false;
+    const finishDrawBtn = document.getElementById('finishDrawRouteBtn');
+    if (finishDrawBtn) finishDrawBtn.disabled = true;
+    const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn');
+    if (cancelDrawBtn) cancelDrawBtn.disabled = true;
+
+    console.log("All map routes and associated markers cleared. Drawing mode reset.");
+};
+
+// Initialize button states on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Ensure mapInstance is available before trying to use it for button states
+    // However, initial button states can be set without mapInstance.
+    const finishDrawBtn = document.getElementById('finishDrawRouteBtn');
+    if (finishDrawBtn) finishDrawBtn.disabled = true;
+    const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn');
+    if (cancelDrawBtn) cancelDrawBtn.disabled = true;
+
+    // initCustomMapLogic is already called by Folium's script tag,
+    // so further map-dependent initializations should happen inside or after initCustomMapLogic
+});
