@@ -3,6 +3,7 @@
 
 {% block title %}Dashboard{% endblock %}
 
+<link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
 <style>
     @keyframes pulsate {
         0% { transform: scale(0.1); opacity: 0.0; }
@@ -186,23 +187,12 @@
     </div>
 </div>
 
+<!-- Directions Modal Removed as LRM provides its own UI -->
+<!--
 <div class="modal fade" id="directionsModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Directions</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-                <div id="routeDetails"></div>
-                <div id="routeMap" style="height: 400px; width: 100%;"></div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-            </div>
-        </div>
-    </div>
+    ... (modal content) ...
 </div>
+-->
 {% endblock %}
 
 {% block scripts %}
@@ -223,5 +213,6 @@
     // All other JavaScript functions (initCustomMapLogic, showLocation, fetchAndDisplayRoute, etc.)
     // and the DOMContentLoaded event listener will be moved to dashboard_map.js
 </script>
+<script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
 <script src="{% static 'js/dashboard_map.js' %}"></script>
 {% endblock %}
