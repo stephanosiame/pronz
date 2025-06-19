@@ -253,7 +253,7 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None, de
                     popup=f'<b>{location.name}</b><br>{location.get_location_type_display()}<br>{location.description or "No description available"}',
                     tooltip=location.name,
                     icon=folium.features.DivIcon(
-                        icon_size=(15, 15), # Set to match your div's size
+                        icon_size=(12, 12), # Set to match your div's size
                         icon_anchor=(7, 7), # Anchor point (half of size)
                         html=div_icon_html,
                         popup_anchor=(0, -10) # Adjust popup anchor if needed
@@ -298,15 +298,15 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None, de
             boundaryControl.onAdd = function(map) {{
                 var div = L.DomUtil.create('div', 'boundary-warning');
                 div.innerHTML = `
-                    <div style="background: rgba(220, 38, 38, 0.9); color: white; padding: 10px; 
+                    <div style="background: rgba(38, 38, 220, 0.9); color: white; padding: 10px; 
                                 border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); 
-                                font-size: 12px; max-width: 250px; border: 2px solid #dc2626;">
+                                font-size: 12px; max-width: 250px; border: 2px solid 	#2563eb;">
                         <div style="font-weight: bold; margin-bottom: 4px;">
                             🏛️ CoICT Campus Only
                         </div>
                         <div style="font-size: 11px; line-height: 1.3;">
                             Navigation is restricted to CoICT campus area. 
-                            Only locations within the red boundary are accessible.
+                            Only locations within the blue boundary are accessible.
                         </div>
                     </div>
                 `;
@@ -315,7 +315,7 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None, de
             boundaryControl.addTo(map);
             
             // Fit bounds to campus area
-            map.fitBounds(strictBounds, {{padding: [20, 20]}});
+            map.fitBounds(strictBounds, {{padding: [100, 100]}});
         }}
     }}, 500);
     """
