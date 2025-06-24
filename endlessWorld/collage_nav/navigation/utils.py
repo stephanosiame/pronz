@@ -15,36 +15,48 @@ import random
 logger = logging.getLogger(__name__)
 
 # CoICT Boundary and Graph Storage
-COICT_CENTER_LAT = -6.771204359255421
-COICT_CENTER_LON = 39.24001333969674
-COICT_BOUNDS_OFFSET = 0.003 # Approx 333 meters, adjust if needed
+COICT_CENTER_LAT = -6.771204359255421  # Center latitude for CoICT campus
+COICT_CENTER_LON = 39.24001333969674  # Center longitude for CoICT campus
+COICT_BOUNDS_OFFSET = 0.003  # Approx 333 meters offset to define a square boundary around the center
 
-COICT_BOUNDARY_POLYGON = Polygon.from_bbox(( # type: ignore
-    COICT_CENTER_LON - COICT_BOUNDS_OFFSET,
-    COICT_CENTER_LAT - COICT_BOUNDS_OFFSET,
-    COICT_CENTER_LON + COICT_BOUNDS_OFFSET,
-    COICT_CENTER_LAT + COICT_BOUNDS_OFFSET
+# Defines the primary operational area for the application.
+# Used for downloading OSM data for the campus graph and for restricting location searches/routing.
+COICT_BOUNDARY_POLYGON = Polygon.from_bbox((  # type: ignore
+    COICT_CENTER_LON - COICT_BOUNDS_OFFSET,  # min_x (west)
+    COICT_CENTER_LAT - COICT_BOUNDS_OFFSET,  # min_y (south)
+    COICT_CENTER_LON + COICT_BOUNDS_OFFSET,  # max_x (east)
+    COICT_CENTER_LAT + COICT_BOUNDS_OFFSET   # max_y (north)
 ))
-COICT_BOUNDARY_POLYGON.srid = 4326 # type: ignore
+COICT_BOUNDARY_POLYGON.srid = 4326  # Set Spatial Reference ID to WGS84
 
 # Ensure BASE_DIR is available, if not, define a sensible default (e.g., current file's directory's parent)
 # This is usually set by Django manage.py, but utils.py might be imported in other contexts
 if not hasattr(settings, 'BASE_DIR'):
     # Fallback if settings.BASE_DIR is not configured (e.g. running script standalone)
+    logger.warning("settings.BASE_DIR not found, falling back to relative path for graph file.")
     settings.BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Path to the cached GraphML file for the CoICT campus road/path network.
 GRAPH_FILE_PATH = os.path.join(settings.BASE_DIR, 'coict_campus_graph.graphml')
-COICT_GRAPH: nx.MultiDiGraph | None = None # Global variable to hold the loaded graph
-
+COICT_GRAPH: nx.MultiDiGraph | None = None  # Global variable to hold the loaded osmnx graph.
 
 def load_coict_graph():
+    """
+    Loads the CoICT campus graph.
+    Tries to load from a cached GraphML file first. If not found or invalid,
+    it downloads the graph data from OpenStreetMap using the COICT_BOUNDARY_POLYGON,
+    processes it, and saves it to the cache file for future use.
+    The loaded graph is stored in the global COICT_GRAPH variable.
+    """
     global COICT_GRAPH
     logger.info("Starting CoICT graph loading process.")
 
+    # If graph is already loaded and seems valid, return it.
     if COICT_GRAPH is not None and COICT_GRAPH.number_of_nodes() > 0:
         logger.info(f"CoICT graph already loaded: {COICT_GRAPH.number_of_nodes()} nodes, {COICT_GRAPH.number_of_edges()} edges.")
         return COICT_GRAPH
 
+    # Attempt to load from cache file
     if os.path.exists(GRAPH_FILE_PATH):
         try:
             logger.info(f"Attempting to load CoICT graph from cache: {GRAPH_FILE_PATH}")
