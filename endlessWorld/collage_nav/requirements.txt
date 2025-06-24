@@ -1,7 +1,7 @@
 Django==5.2.1
 psycopg2-binary==2.9.10
 # GDAL is needed for GeoDjango. If direct versioning fails, pip might find a wheel.
-GDAL
+GDAL==3.8.4
 osmnx>=1.1.0
 networkx>=2.5
 shapely
@@ -12,11 +12,12 @@ django-crispy-forms==2.4
 crispy-bootstrap5==2025.4
 python-decouple==3.8
 twilio # Keep for SMS functionality, version will be resolved by pip
-requests==2.22.0 # Or let it be resolved as a dependency
+requests # Or let it be resolved as a dependency
 numpy==1.26.4 # Updated version from previous attempt
 beautifulsoup4==4.13.4 # If used
 sqlparse==0.5.3 # Django dependency
 asgiref==3.8.1 # Django dependency
+geopy # Added for distance calculations
 # Keep other direct dependencies if they seem core to the app's described features
 # For example, if reportlab or gdown are confirmed as used.
 # For now, focusing on the core GIS and Django web app functionality.

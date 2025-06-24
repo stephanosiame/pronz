@@ -150,25 +150,67 @@ function initializeDashboardAppLogic() {
         loadAndDisplayGeofences();
     }
 
-    // Event listeners for UI elements (search, inputs, etc.)
-    // ... (This part of your existing initializeDashboardAppLogic should be preserved) ...
-    // const followMeButton = document.getElementById('toggleFollowMe'); // Removed
-    // if (followMeButton) followMeButton.addEventListener('click', toggleFollowMeMode); // Removed
-
     const searchInput = document.getElementById('searchInput');
-    if (searchInput) { /* ... existing search input logic ... */ }
-    const searchForm = document.getElementById('searchForm');
-    if (searchForm) searchForm.addEventListener('submit', (e) => e.preventDefault());
+    const searchResultsContainer = document.getElementById('searchResults');
     const startPointInput = document.getElementById('startPointInput');
-    const startPointResults = document.getElementById('startPointResults');
+    const startPointResultsContainer = document.getElementById('startPointResults');
     const destinationPointInput = document.getElementById('destinationPointInput');
-    const destinationPointResults = document.getElementById('destinationPointResults');
-    // ... (event listeners for startPointInput, destinationPointInput, displayLocationSuggestions) ...
-    // Make sure displayLocationSuggestions and its callers are still here if they were part of original file.
+    const destinationPointResultsContainer = document.getElementById('destinationPointResults');
+
+    if (searchInput && searchResultsContainer) {
+        searchInput.addEventListener('input', function() {
+            displayLocationSuggestions(this.value, searchResultsContainer, searchInput, 'general');
+        });
+        // Prevent form submission from reloading page for the main search
+        const searchForm = document.getElementById('searchForm');
+        if (searchForm) {
+            searchForm.addEventListener('submit', function(e) {
+                e.preventDefault();
+                displayLocationSuggestions(searchInput.value, searchResultsContainer, searchInput, 'general');
+            });
+        }
+    }
+
+    if (startPointInput && startPointResultsContainer) {
+        startPointInput.addEventListener('input', function() {
+            if (this.value.startsWith("Pin:") || this.value === "Current Location") return; // Don't search if it's a pin or current loc
+            document.getElementById('useCurrentLocationCheck').checked = false; // Uncheck if typing
+            selectedStartLocationId = null; // Clear previous selections
+            selectedStartCoords = null;
+            displayLocationSuggestions(this.value, startPointResultsContainer, startPointInput, 'start');
+        });
+    }
+
+    if (destinationPointInput && destinationPointResultsContainer) {
+        destinationPointInput.addEventListener('input', function() {
+             if (this.value.startsWith("Pin:")) return; // Don't search if it's a pin
+            selectedEndLocationId = null; // Clear previous selections
+            selectedEndCoords = null;
+            displayLocationSuggestions(this.value, destinationPointResultsContainer, destinationPointInput, 'destination');
+        });
+    }
 
     const useCurrentLocationCheck = document.getElementById('useCurrentLocationCheck');
-    if (useCurrentLocationCheck) { /* ... existing logic ... */ }
-
+    if (useCurrentLocationCheck) {
+        useCurrentLocationCheck.addEventListener('change', function() {
+            if (this.checked) {
+                if (currentUserLat && currentUserLng) {
+                    startPointInput.value = 'Current Location';
+                    startPointInput.disabled = true;
+                    selectedStartLocationId = null; // Clear ID selection
+                    selectedStartCoords = null; // Clear pin selection
+                    if(startPointResultsContainer) startPointResultsContainer.innerHTML = '';
+                } else {
+                    alert('Current location is not available. Please enable location services.');
+                    this.checked = false; // Revert check
+                }
+            } else {
+                startPointInput.value = '';
+                startPointInput.disabled = false;
+                startPointInput.focus();
+            }
+        });
+    }
 
     const getDirectionsButton = document.getElementById('getDirectionsButton');
     if (getDirectionsButton) {
@@ -258,6 +300,97 @@ function initializeDashboardAppLogic() {
     // Basic LRM demo is commented out.
 }
 
+function showLocationOnMap(lat, lon, name) {
+    if (!mapInstance) return;
+
+    if (searchResultMarker && mapInstance.hasLayer(searchResultMarker)) {
+        mapInstance.removeLayer(searchResultMarker);
+    }
+    // Custom icon for searched/selected location
+    const customIcon = L.divIcon({
+        className: 'custom-location-marker', // Defined in dashboard.html styles
+        iconSize: [15, 15],
+        iconAnchor: [7, 7]
+    });
+
+    searchResultMarker = L.marker([lat, lon], { icon: customIcon }).addTo(mapInstance);
+
+    let popupContent = `<b>${name}</b><br>Lat: ${lat.toFixed(5)}, Lon: ${lon.toFixed(5)}`;
+    // Assuming a global function setAsDestination is available from the original code
+    // It might need locationId, so if the location object has it, it could be passed to showLocationOnMap
+    // For now, this just shows coords. If loc.location_id is available, it can be used for setAsDestination.
+
+    searchResultMarker.bindPopup(popupContent).openPopup();
+    mapInstance.setView([lat, lon], 18); // Zoom in closer
+}
+
+
+function displayLocationSuggestions(query, resultsContainer, inputField, suggestionType) {
+    if (!query || query.length < 2) { // Minimum 2 chars for text, coordinates will also be > 2 ("1,1")
+        resultsContainer.innerHTML = '';
+        resultsContainer.style.display = 'none';
+        return;
+    }
+
+    fetch(`${SEARCH_LOCATIONS_URL}?q=${encodeURIComponent(query)}`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Network response was not ok: ${response.statusText}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            resultsContainer.innerHTML = ''; // Clear previous results
+            if (data.locations && data.locations.length > 0) {
+                const ul = document.createElement('ul');
+                ul.className = 'list-group';
+                data.locations.forEach(loc => {
+                    const li = document.createElement('li');
+                    li.className = 'list-group-item list-group-item-action';
+                    let displayText = loc.name;
+                    if (data.search_type_performed === 'coordinate' && loc.distance_meters !== undefined) {
+                        displayText += ` <small class="text-muted">(${loc.distance_meters}m away)</small>`;
+                    }
+                    li.innerHTML = displayText; // Use innerHTML to render the small tag
+                    li.addEventListener('click', function() {
+                        inputField.value = loc.name;
+                        resultsContainer.innerHTML = '';
+                        resultsContainer.style.display = 'none';
+
+                        if (suggestionType === 'start') {
+                            selectedStartLocationId = loc.location_id;
+                            selectedStartLocationName = loc.name;
+                            selectedStartCoords = { lat: loc.latitude, lon: loc.longitude }; // Store coords too
+                            document.getElementById('useCurrentLocationCheck').checked = false;
+                            startPointInput.disabled = false;
+                        } else if (suggestionType === 'destination') {
+                            selectedEndLocationId = loc.location_id;
+                            selectedEndLocationName = loc.name;
+                            selectedEndCoords = { lat: loc.latitude, lon: loc.longitude }; // Store coords too
+                        }
+                        // For 'general' search, or any type, show it on map
+                        showLocationOnMap(loc.latitude, loc.longitude, loc.name);
+                    });
+                    ul.appendChild(li);
+                });
+                resultsContainer.appendChild(ul);
+                resultsContainer.style.display = 'block';
+            } else {
+                if (data.message){
+                     resultsContainer.innerHTML = `<p class="list-group-item text-muted">${data.message}</p>`;
+                } else {
+                    resultsContainer.innerHTML = '<p class="list-group-item text-muted">No locations found.</p>';
+                }
+                resultsContainer.style.display = 'block';
+            }
+        })
+        .catch(error => {
+            console.error('Error fetching location suggestions:', error);
+            resultsContainer.innerHTML = '<p class="list-group-item text-danger">Error loading suggestions.</p>';
+            resultsContainer.style.display = 'block';
+        });
+}
+
 // Custom Router for Leaflet Routing Machine
 const CustomRouter = L.Class.extend({
     initialize: function(options) { L.Util.setOptions(this, options); },
@@ -288,10 +421,18 @@ const CustomRouter = L.Class.extend({
                 });
                 callback.call(context, null, routes);
             } else {
-                callback.call(context, { status: -1, message: data.error || "Could not retrieve route." });
+                const errorMessage = data.error || "Could not retrieve route from the server.";
+                console.error("CustomRouter Error:", errorMessage);
+                alert(`Routing Error: ${errorMessage}`); // More prominent alert
+                callback.call(context, { status: -1, message: errorMessage });
             }
         })
-        .catch(error => callback.call(context, { status: -1, message: `Network error: ${error.message}` }));
+        .catch(error => {
+            const networkErrorMessage = `Network error or server unavailable: ${error.message}`;
+            console.error("CustomRouter Network Error:", networkErrorMessage);
+            alert(`Routing Error: ${networkErrorMessage}`); // More prominent alert
+            callback.call(context, { status: -1, message: networkErrorMessage });
+        });
         return this;
     }
 });

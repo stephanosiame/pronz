@@ -19,6 +19,7 @@ urlpatterns = [
     path('api/location-details/<uuid:location_id>/', views.get_location_details_json, name='get_location_details_json'),
     path('api/get-last-user-location/', views.get_last_user_location, name='get_last_user_location'),
     path('api/geofences/', views.api_get_geofences, name='api_get_geofences'),
+    path('api/locations-in-area/', views.get_locations_in_area, name='get_locations_in_area'), # New API for area search
 
     # Notification API endpoints
     path('api/notifications/unread_count/', views.get_unread_notification_count, name='get_unread_notification_count'),

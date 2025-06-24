@@ -118,14 +118,15 @@ class UserSearch(models.Model):
     user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)
     search_query = models.CharField(max_length=200)
     search_location = models.ForeignKey(Location, on_delete=models.SET_NULL, null=True, blank=True)
-    results_count = models.IntegerField(default=0)  # Added to track result count
+    results_count = models.IntegerField(default=0)
     timestamp = models.DateTimeField(auto_now_add=True)
-    
+    search_type = models.CharField(max_length=20, default='text')  # Added search_type field
+
     class Meta:
         ordering = ['-timestamp']
     
     def __str__(self):
-        return f"{self.user.username}: {self.search_query}"
+        return f"{self.user.username}: {self.search_query} (Type: {self.search_type})"
 
 class Geofence(models.Model):
     TRIGGER_TYPES = (

@@ -11,6 +11,7 @@ from django.db.models import Q, F
 from django.contrib.gis.geos import Point, Polygon
 from django.contrib.gis.measure import Distance
 from django.contrib.gis.db.models.functions import Distance as DistanceFunction
+from django.contrib.gis.geos import GEOSGeometry, GEOSException # Added for area search
 from django.utils import timezone
 from datetime import datetime, timedelta
 import json
@@ -434,48 +435,121 @@ def dashboard_view(request):
 
 @login_required
 def search_locations(request):
-    """Search for locations within COICT boundary only"""
-    query = request.GET.get('q', '')
+    """
+    Search for locations within COICT boundary.
+    Can search by text (name, description, type, address) or by coordinates.
     
-    if len(query) < 2:
-        return JsonResponse({'locations': []})
-    
-    # Search only within COICT boundary
-    boundary_locations = filter_locations_by_boundary(Location.objects.all())
-    
-    locations = boundary_locations.filter(
-        Q(name__icontains=query) | 
-        Q(description__icontains=query) |
-        Q(location_type__icontains=query) |
-        Q(address__icontains=query)
-    ).values(
+    Query Parameters:
+        q (str): The search query.
+                 For text search: e.g., "Library"
+                 For coordinate search: e.g., "-6.7712,39.2400" (latitude,longitude)
+
+    Returns:
+        JsonResponse:
+            - locations (list): List of found locations with details.
+                                If coordinate search, includes 'distance_meters'.
+            - boundary_restricted (bool): Always true.
+            - total_found (int): Number of locations returned (max 15).
+            - search_type_performed (str): "text" or "coordinate".
+            - message (str, optional): Message for empty/invalid queries.
+    """
+    query = request.GET.get('q', '').strip()
+    locations_qs = Location.objects.none() # Start with an empty queryset
+    search_type = "text" # Default search type
+
+    if not query:
+        return JsonResponse({'locations': [], 'message': 'Query is empty.', 'total_found': 0, 'search_type_performed': search_type})
+
+    # Attempt to parse query as "lat,lon" for coordinate-based search
+    try:
+        if ',' in query:
+            lat_str, lon_str = query.split(',')
+            lat = float(lat_str.strip())
+            lon = float(lon_str.strip())
+
+            # Validate coordinate ranges
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                raise ValueError("Latitude or longitude out of range.")
+
+            search_point = Point(lon, lat, srid=4326) # Create a GIS Point
+            search_type = "coordinate"
+
+            # Ensure the queried coordinates are within the CoICT campus boundary
+            if not is_within_coict_boundary(search_point):
+                UserSearch.objects.create(
+                    user=request.user, search_query=query, timestamp=timezone.now(), results_count=0, search_type=search_type
+                )
+                return JsonResponse({
+                    'locations': [],
+                    'message': 'Queried coordinates are outside CoICT campus boundary.',
+                    'boundary_restricted': True,
+                    'total_found': 0,
+                    'search_type_performed': search_type
+                })
+
+            # If coordinates are valid and within campus, search for locations
+            # near this point (e.g., within 100 meters).
+            # Results are also filtered by the overall COICT_BOUNDARY_POLYGON.
+            locations_qs = filter_locations_by_boundary(Location.objects.all()).filter(
+                coordinates__distance_lte=(search_point, Distance(m=100)) # 100m radius
+            ).annotate(
+                distance_from_query=DistanceFunction('coordinates', search_point) # Calculate distance
+            ).order_by('distance_from_query') # Order by nearest first
+        else:
+            # If not parsable as "lat,lon", it's a text search.
+            raise ValueError("Not a coordinate string, fallback to text search.")
+
+    except ValueError: # Handles errors from float conversion or explicit raises
+        search_type = "text" # Ensure search_type is text for this block
+        # Standard text search logic
+        if len(query) < 2: # Minimum length for text search
+             UserSearch.objects.create(
+                user=request.user, search_query=query, timestamp=timezone.now(), results_count=0, search_type=search_type
+            )
+             return JsonResponse({'locations': [], 'message': 'Text query too short (minimum 2 characters).', 'total_found': 0, 'search_type_performed': search_type})
+
+        # Perform text search against name, description, type, address
+        boundary_locations = filter_locations_by_boundary(Location.objects.all())
+        locations_qs = boundary_locations.filter(
+            Q(name__icontains=query) |
+            Q(description__icontains=query) |
+            Q(location_type__icontains=query) |
+            Q(address__icontains=query)
+        )
+
+    # Common processing for both search types: select fields and limit results
+    final_locations = locations_qs.values(
         'location_id', 'name', 'location_type', 
         'description', 'address', 'coordinates'
-    )[:15]
-    
+    )[:15] # Limit results
+
     # Save search query with metadata
-    if query:
-        UserSearch.objects.create(
-            user=request.user,
-            search_query=query,
-            timestamp=timezone.now(),
-            results_count=locations.count()
-        )
+    UserSearch.objects.create(
+        user=request.user,
+        search_query=query,
+        timestamp=timezone.now(),
+        results_count=final_locations.count(), # Count after slicing for accurate results_count
+        search_type=search_type
+    )
     
     # Convert coordinates for JSON response
     locations_list = []
-    for loc in locations:
+    for loc in final_locations:
         loc_dict = dict(loc)
         if loc['coordinates']:
             loc_dict['latitude'] = loc['coordinates'].y
             loc_dict['longitude'] = loc['coordinates'].x
-            del loc_dict['coordinates']
+            # If it was a coordinate search, we might have 'distance_from_query'
+            if 'distance_from_query' in loc and loc['distance_from_query'] is not None:
+                loc_dict['distance_meters'] = round(loc['distance_from_query'].m, 2)
+            del loc_dict['coordinates'] # Don't send the GEOS object
         locations_list.append(loc_dict)
     
     return JsonResponse({
         'locations': locations_list,
-        'boundary_restricted': True,
-        'total_found': len(locations_list)
+        'boundary_restricted': True, # All searches are boundary restricted
+        'total_found': len(locations_list),
+        'search_type_performed': search_type
     })
 
 @login_required
@@ -1084,3 +1158,141 @@ def api_get_geofences(request): # type: ignore
                 'boundary_geojson': json.loads(gf.boundary.geojson) # type: ignore
             })
     return JsonResponse({'geofences': geofences_data})
+
+@login_required
+@csrf_exempt # Consider CSRF implications if used beyond trusted clients or if state changes
+@require_http_methods(["POST"]) # Enforce POST
+def get_locations_in_area(request):
+    """
+    API endpoint to find locations within a given geographical area (polygon or bbox),
+    restricted to the CoICT campus boundary.
+
+    Method: POST
+    URL: /api/locations-in-area/
+    Requires Login: Yes
+
+    JSON Payload Parameters:
+        One of the following must be provided:
+        - geojson_polygon (str or dict): A GeoJSON Polygon string or a GeoJSON Polygon dict
+                                          defining the search area.
+                                          Example (string):
+                                          '{ "type": "Polygon", "coordinates": [[ [lon1, lat1], [lon2, lat2], ... ]]}'
+        - bbox (str): A comma-separated string representing "min_lon,min_lat,max_lon,max_lat".
+                      Example: "39.235,-6.775,39.245,-6.765"
+
+    Successful JSON Response (200 OK):
+        {
+            "success": true,
+            "locations": [
+                {
+                    "location_id": "uuid-string",
+                    "name": "Location Name",
+                    "location_type": "building",
+                    "description": "Description text",
+                    "address": "Location address",
+                    "latitude": -6.12345,
+                    "longitude": 39.12345
+                },
+                // ... other locations
+            ],
+            "boundary_restricted": true,
+            "total_found": 2
+        }
+
+    Error JSON Response (400 Bad Request or 500 Internal Server Error):
+        {
+            "success": false,
+            "error": "Error message describing the issue."
+        }
+        Common errors:
+        - "Missing geojson_polygon or bbox in request."
+        - "Invalid GeoJSON polygon format: <details>"
+        - "Invalid bounding box format: <details>"
+        - "Invalid JSON payload."
+    """
+    try:
+        data = json.loads(request.body)
+        area_polygon = None
+
+        if 'geojson_polygon' in data:
+            try:
+                geojson_str = data['geojson_polygon']
+                if isinstance(geojson_str, dict): # If already parsed by something upstream
+                    geojson_str = json.dumps(geojson_str)
+
+                # Validate basic GeoJSON structure (optional but good)
+                geom = GEOSGeometry(geojson_str)
+                if not isinstance(geom, Polygon):
+                    return JsonResponse({'success': False, 'error': 'Invalid GeoJSON: Not a Polygon.'}, status=400)
+                area_polygon = geom
+            except (GEOSException, TypeError, json.JSONDecodeError) as e:
+                logger.warning(f"Invalid GeoJSON polygon provided: {e}")
+                return JsonResponse({'success': False, 'error': f'Invalid GeoJSON polygon format: {e}'}, status=400)
+
+        elif 'bbox' in data:
+            try:
+                bbox_str = data['bbox']
+                coords = [float(c.strip()) for c in bbox_str.split(',')]
+                if len(coords) != 4:
+                    raise ValueError("Bounding box must contain 4 coordinates.")
+                # Ensure min_lon < max_lon and min_lat < max_lat if strict validation is needed.
+                # For Polygon.from_bbox, order is (xmin, ymin, xmax, ymax)
+                area_polygon = Polygon.from_bbox(coords)
+                area_polygon.srid = 4326 # Assume WGS84 if not specified
+            except ValueError as e:
+                logger.warning(f"Invalid bounding box string: {e}")
+                return JsonResponse({'success': False, 'error': f'Invalid bounding box format: {e}'}, status=400)
+
+        else:
+            return JsonResponse({'success': False, 'error': 'Missing geojson_polygon or bbox in request.'}, status=400)
+
+        if not area_polygon: # Should have been caught by earlier checks
+             return JsonResponse({'success': False, 'error': 'Could not define search area.'}, status=400)
+
+        # Ensure the user's area has SRID set, default to 4326 if not
+        if not area_polygon.srid:
+            area_polygon.srid = 4326
+
+        # Important: Intersect the user's area with the COICT campus boundary
+        # to ensure we only return locations within both the requested area AND campus.
+        # Note: intersection might return GeometryCollection if disjoint, or empty if no overlap.
+        # However, Location.coordinates__within=area_polygon and Location.coordinates__within=COICT_BOUNDARY_POLYGON
+        # effectively does this intersection at the query level.
+
+        # Query locations within the user-defined area AND within COICT boundary
+        locations_qs = Location.objects.filter(
+            coordinates__within=area_polygon
+        ).filter(
+            coordinates__within=COICT_BOUNDARY_POLYGON # Redundant if filter_locations_by_boundary is used
+        )
+        # A more efficient way might be to use filter_locations_by_boundary first, then filter by user's area.
+        # locations_qs = filter_locations_by_boundary(Location.objects.all()).filter(
+        #     coordinates__within=area_polygon
+        # )
+
+        final_locations = locations_qs.values(
+            'location_id', 'name', 'location_type',
+            'description', 'address', 'coordinates'
+        )[:50] # Limit results, e.g., to 50
+
+        locations_list = []
+        for loc in final_locations:
+            loc_dict = dict(loc)
+            if loc['coordinates']:
+                loc_dict['latitude'] = loc['coordinates'].y
+                loc_dict['longitude'] = loc['coordinates'].x
+                del loc_dict['coordinates']
+            locations_list.append(loc_dict)
+
+        return JsonResponse({
+            'success': True,
+            'locations': locations_list,
+            'boundary_restricted': True, # All results are implicitly campus-restricted
+            'total_found': len(locations_list)
+        })
+
+    except json.JSONDecodeError:
+        return JsonResponse({'success': False, 'error': 'Invalid JSON payload.'}, status=400)
+    except Exception as e:
+        logger.error(f"Unexpected error in get_locations_in_area: {e}", exc_info=True)
+        return JsonResponse({'success': False, 'error': 'An unexpected server error occurred.'}, status=500)
