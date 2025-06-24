@@ -1,9 +1,9 @@
 let mapInstance = null;
 
-// New global variables for manual route drawing
-let isDrawingManualRoute = false;
-let manualRoutePoints = [];
-let manualRoutePolyline = null;
+// New global variables for manual route drawing - REMOVED
+// let isDrawingManualRoute = false;
+// let manualRoutePoints = [];
+// let manualRoutePolyline = null;
 
 // These variables were global in dashboard.html, ensure they are accessible within this module
 // or passed as parameters where needed.
@@ -29,7 +29,7 @@ let currentUserSpeed = null;
 let isWatchingPosition = false;
 let userLivePositionMarker = null;
 let userAccuracyCircle = null;
-let followMeActive = false;
+// let followMeActive = false; // Removed as per request
 const OFF_ROUTE_THRESHOLD_METERS = 25;
 const VISUAL_SNAP_THRESHOLD_METERS = 15; // This might still be useful for snapping user to LRM route
 let isCurrentlyNotifyingOffRoute = false;
@@ -63,14 +63,14 @@ window.initCustomMapLogic = function(generatedMapId) {
     }
 
     mapInstance.on('click', function(e) {
-        if (isDrawingManualRoute) {
-            manualRoutePoints.push(e.latlng);
-            updateManualRoutePolyline();
-            return;
-        }
-        if (followMeActive) {
-            toggleFollowMeMode(); // Optionally disable follow-me on map click
-        }
+        // if (isDrawingManualRoute) { // Removed manual drawing logic
+        //     manualRoutePoints.push(e.latlng);
+        //     updateManualRoutePolyline();
+        //     return;
+        // }
+        // if (followMeActive) { // Removed follow me logic
+        //     toggleFollowMeMode(); // Optionally disable follow-me on map click
+        // }
         clickedLat = e.latlng.lat;
         clickedLng = e.latlng.lng;
         if (clickedPointMarker && mapInstance.hasLayer(clickedPointMarker)) {
@@ -152,8 +152,8 @@ function initializeDashboardAppLogic() {
 
     // Event listeners for UI elements (search, inputs, etc.)
     // ... (This part of your existing initializeDashboardAppLogic should be preserved) ...
-    const followMeButton = document.getElementById('toggleFollowMe');
-    if (followMeButton) followMeButton.addEventListener('click', toggleFollowMeMode);
+    // const followMeButton = document.getElementById('toggleFollowMe'); // Removed
+    // if (followMeButton) followMeButton.addEventListener('click', toggleFollowMeMode); // Removed
 
     const searchInput = document.getElementById('searchInput');
     if (searchInput) { /* ... existing search input logic ... */ }
@@ -232,10 +232,10 @@ function initializeDashboardAppLogic() {
                         lrmControl = null;
                     }
 
-                    if (manualRoutePolyline && mapInstance.hasLayer(manualRoutePolyline)) { // Clear manual route
-                        mapInstance.removeLayer(manualRoutePolyline);
-                        manualRoutePolyline = null; manualRoutePoints = [];
-                    }
+                    // if (manualRoutePolyline && mapInstance.hasLayer(manualRoutePolyline)) { // Clear manual route - REMOVED
+                    //     mapInstance.removeLayer(manualRoutePolyline);
+                    //     manualRoutePolyline = null; manualRoutePoints = [];
+                    // }
 
                     lrmControl = L.Routing.control({
                         waypoints: [startData.latlng, endData.latlng],
@@ -350,7 +350,7 @@ function updateUserMarkerOnMap(lat, lng, accuracy, heading) {
 function handlePositionError(error) { /* ... existing ... */ }
 function startWatchingPosition() { /* ... existing ... */ }
 function stopWatchingPosition() { /* ... existing ... */ }
-function toggleFollowMeMode() { /* ... existing ... */ }
+// function toggleFollowMeMode() { /* ... existing ... */ } // Removed
 function showOffRouteNotification(distance) { /* ... existing ... */ }
 function hideOffRouteNotification() { /* ... existing ... */ }
 
@@ -420,25 +420,25 @@ window.zoomOut = function() { /* ... existing ... */ };
 window.showRecommendationOnMap = function(locationId, mediaUrl) { /* ... existing ... */ };
 function loadAndDisplayGeofences() { /* ... existing ... */ }
 
-function startManualRouteDrawing() {
-    if (!ensureMapInstance()) { alert("Map is not available for drawing."); return; }
-    if (lrmControl) { // Clear LRM if active
-        if (typeof lrmControl.remove === 'function') lrmControl.remove();
-        lrmControl = null;
-    }
-    isDrawingManualRoute = true;
-    manualRoutePoints = [];
-    if (manualRoutePolyline && mapInstance.hasLayer(manualRoutePolyline)) mapInstance.removeLayer(manualRoutePolyline);
-    manualRoutePolyline = null;
-    if (mapInstance._container) mapInstance._container.style.cursor = 'crosshair';
-    const startDrawBtn = document.getElementById('startDrawRouteBtn'); if (startDrawBtn) startDrawBtn.disabled = true;
-    const finishDrawBtn = document.getElementById('finishDrawRouteBtn'); if (finishDrawBtn) finishDrawBtn.disabled = false;
-    const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn'); if (cancelDrawBtn) cancelDrawBtn.disabled = false;
-    console.log("Manual route drawing started. LRM control (if any) cleared.");
-}
-function updateManualRoutePolyline() { /* ... existing ... */ }
-function finishManualRouteDrawing() { /* ... existing ... */ }
-window.cancelManualRouteDrawing = function() { /* ... existing ... */ };
+// function startManualRouteDrawing() { // REMOVED
+//     if (!ensureMapInstance()) { alert("Map is not available for drawing."); return; }
+//     if (lrmControl) { // Clear LRM if active
+//         if (typeof lrmControl.remove === 'function') lrmControl.remove();
+//         lrmControl = null;
+//     }
+//     isDrawingManualRoute = true;
+//     manualRoutePoints = [];
+//     if (manualRoutePolyline && mapInstance.hasLayer(manualRoutePolyline)) mapInstance.removeLayer(manualRoutePolyline);
+//     manualRoutePolyline = null;
+//     if (mapInstance._container) mapInstance._container.style.cursor = 'crosshair';
+//     const startDrawBtn = document.getElementById('startDrawRouteBtn'); if (startDrawBtn) startDrawBtn.disabled = true;
+//     const finishDrawBtn = document.getElementById('finishDrawRouteBtn'); if (finishDrawBtn) finishDrawBtn.disabled = false;
+//     const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn'); if (cancelDrawBtn) cancelDrawBtn.disabled = false;
+//     console.log("Manual route drawing started. LRM control (if any) cleared.");
+// }
+// function updateManualRoutePolyline() { /* ... existing ... */ } // REMOVED (part of manual drawing)
+// function finishManualRouteDrawing() { /* ... existing ... */ } // REMOVED
+// window.cancelManualRouteDrawing = function() { /* ... existing ... */ }; // REMOVED
 
 window.clearAllMapRoutes = function() {
     if (!ensureMapInstance()) { console.warn("Map not available to clear routes."); return; }
@@ -447,21 +447,21 @@ window.clearAllMapRoutes = function() {
         lrmControl = null;
         console.log("LRM control cleared.");
     }
-    if (manualRoutePolyline && mapInstance.hasLayer(manualRoutePolyline)) { // Clear manual route
-        mapInstance.removeLayer(manualRoutePolyline);
-        console.log("Manual route polyline cleared.");
-    }
-    manualRoutePolyline = null; manualRoutePoints = [];
-    isDrawingManualRoute = false;
+    // if (manualRoutePolyline && mapInstance.hasLayer(manualRoutePolyline)) { // Clear manual route - REMOVED
+    //     mapInstance.removeLayer(manualRoutePolyline);
+    //     console.log("Manual route polyline cleared.");
+    // }
+    // manualRoutePolyline = null; manualRoutePoints = []; // REMOVED
+    // isDrawingManualRoute = false; // REMOVED
     if (mapInstance._container) mapInstance._container.style.cursor = '';
-    const startDrawBtn = document.getElementById('startDrawRouteBtn'); if (startDrawBtn) startDrawBtn.disabled = false;
-    const finishDrawBtn = document.getElementById('finishDrawRouteBtn'); if (finishDrawBtn) finishDrawBtn.disabled = true;
-    const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn'); if (cancelDrawBtn) cancelDrawBtn.disabled = true;
+    // const startDrawBtn = document.getElementById('startDrawRouteBtn'); if (startDrawBtn) startDrawBtn.disabled = false; // REMOVED
+    // const finishDrawBtn = document.getElementById('finishDrawRouteBtn'); if (finishDrawBtn) finishDrawBtn.disabled = true; // REMOVED
+    // const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn'); if (cancelDrawBtn) cancelDrawBtn.disabled = true; // REMOVED
     console.log("All map routes cleared. Drawing mode reset.");
 };
 
 document.addEventListener('DOMContentLoaded', function() {
-    const finishDrawBtn = document.getElementById('finishDrawRouteBtn'); if (finishDrawBtn) finishDrawBtn.disabled = true;
-    const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn'); if (cancelDrawBtn) cancelDrawBtn.disabled = true;
+    // const finishDrawBtn = document.getElementById('finishDrawRouteBtn'); if (finishDrawBtn) finishDrawBtn.disabled = true; // REMOVED
+    // const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn'); if (cancelDrawBtn) cancelDrawBtn.disabled = true; // REMOVED
 });
 [end of endlessWorld/collage_nav/static/js/dashboard_map.js]
