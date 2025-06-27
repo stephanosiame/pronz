@@ -16,6 +16,7 @@ from django.utils import timezone
 from datetime import datetime, timedelta
 import json
 import logging # Added
+import requests # For Nominatim OSM Search
 from django.core.serializers import serialize
 import random
 import string
@@ -455,102 +456,160 @@ def search_locations(request):
     """
     query = request.GET.get('q', '').strip()
     locations_qs = Location.objects.none() # Start with an empty queryset
-    search_type = "text" # Default search type
+    query = request.GET.get('q', '').strip()
+    search_type_performed = "text_local" # Initial assumption
+    locations_list = []
+    message = None
 
     if not query:
-        return JsonResponse({'locations': [], 'message': 'Query is empty.', 'total_found': 0, 'search_type_performed': search_type})
+        return JsonResponse({'locations': [], 'message': 'Query is empty.', 'total_found': 0, 'search_type_performed': 'empty_query'})
 
-    # Attempt to parse query as "lat,lon" for coordinate-based search
+    # Attempt to parse query as "lat,lon" for coordinate-based search first
     try:
         if ',' in query:
             lat_str, lon_str = query.split(',')
             lat = float(lat_str.strip())
             lon = float(lon_str.strip())
 
-            # Validate coordinate ranges
             if not (-90 <= lat <= 90 and -180 <= lon <= 180):
                 raise ValueError("Latitude or longitude out of range.")
 
-            search_point = Point(lon, lat, srid=4326) # Create a GIS Point
-            search_type = "coordinate"
+            search_point = Point(lon, lat, srid=4326)
+            search_type_performed = "coordinate_local"
 
-            # Ensure the queried coordinates are within the CoICT campus boundary
             if not is_within_coict_boundary(search_point):
-                UserSearch.objects.create(
-                    user=request.user, search_query=query, timestamp=timezone.now(), results_count=0, search_type=search_type
-                )
-                return JsonResponse({
-                    'locations': [],
-                    'message': 'Queried coordinates are outside CoICT campus boundary.',
-                    'boundary_restricted': True,
-                    'total_found': 0,
-                    'search_type_performed': search_type
-                })
+                message = 'Queried coordinates are outside CoICT campus boundary.'
+            else:
+                # Search local DB for locations near this point within COICT boundary
+                locations_qs = filter_locations_by_boundary(Location.objects.all()).filter(
+                    coordinates__distance_lte=(search_point, Distance(m=100))
+                ).annotate(
+                    distance_from_query=DistanceFunction('coordinates', search_point)
+                ).order_by('distance_from_query')
 
-            # If coordinates are valid and within campus, search for locations
-            # near this point (e.g., within 100 meters).
-            # Results are also filtered by the overall COICT_BOUNDARY_POLYGON.
-            locations_qs = filter_locations_by_boundary(Location.objects.all()).filter(
-                coordinates__distance_lte=(search_point, Distance(m=100)) # 100m radius
-            ).annotate(
-                distance_from_query=DistanceFunction('coordinates', search_point) # Calculate distance
-            ).order_by('distance_from_query') # Order by nearest first
+                db_locations = locations_qs.values(
+                    'location_id', 'name', 'location_type',
+                    'description', 'address', 'coordinates'
+                )[:15]
+
+                for loc in db_locations:
+                    loc_dict = dict(loc)
+                    if loc['coordinates']:
+                        loc_dict['latitude'] = loc['coordinates'].y
+                        loc_dict['longitude'] = loc['coordinates'].x
+                        if 'distance_from_query' in loc and loc['distance_from_query'] is not None:
+                            loc_dict['distance_meters'] = round(loc['distance_from_query'].m, 2)
+                        del loc_dict['coordinates']
+                    loc_dict['source'] = 'local_db'
+                    locations_list.append(loc_dict)
         else:
-            # If not parsable as "lat,lon", it's a text search.
-            raise ValueError("Not a coordinate string, fallback to text search.")
+            # Fallback to text search if not coordinate format
+            raise ValueError("Not a coordinate string, proceed to text search.")
 
-    except ValueError: # Handles errors from float conversion or explicit raises
-        search_type = "text" # Ensure search_type is text for this block
-        # Standard text search logic
-        if len(query) < 2: # Minimum length for text search
-             UserSearch.objects.create(
-                user=request.user, search_query=query, timestamp=timezone.now(), results_count=0, search_type=search_type
+    except ValueError: # Handles non-coordinate queries or parsing errors
+        search_type_performed = "text_local"
+        if len(query) < 2:
+            message = 'Text query too short (minimum 2 characters).'
+        else:
+            # Perform text search against local Location model (campus only)
+            boundary_locations = filter_locations_by_boundary(Location.objects.all())
+            locations_qs = boundary_locations.filter(
+                Q(name__icontains=query) |
+                Q(description__icontains=query) |
+                Q(location_type__icontains=query) |
+                Q(address__icontains=query)
             )
-             return JsonResponse({'locations': [], 'message': 'Text query too short (minimum 2 characters).', 'total_found': 0, 'search_type_performed': search_type})
+            db_locations = locations_qs.values(
+                'location_id', 'name', 'location_type',
+                'description', 'address', 'coordinates'
+            )[:15]
 
-        # Perform text search against name, description, type, address
-        boundary_locations = filter_locations_by_boundary(Location.objects.all())
-        locations_qs = boundary_locations.filter(
-            Q(name__icontains=query) |
-            Q(description__icontains=query) |
-            Q(location_type__icontains=query) |
-            Q(address__icontains=query)
-        )
+            for loc in db_locations:
+                loc_dict = dict(loc)
+                if loc['coordinates']:
+                    loc_dict['latitude'] = loc['coordinates'].y
+                    loc_dict['longitude'] = loc['coordinates'].x
+                    del loc_dict['coordinates']
+                loc_dict['source'] = 'local_db'
+                locations_list.append(loc_dict)
 
-    # Common processing for both search types: select fields and limit results
-    final_locations = locations_qs.values(
-        'location_id', 'name', 'location_type', 
-        'description', 'address', 'coordinates'
-    )[:15] # Limit results
+            # If no results from local DB text search, try Nominatim
+            if not locations_list:
+                search_type_performed = "text_osm_fallback"
+                logger.info(f"Local search for '{query}' yielded no results. Trying Nominatim OSM search.")
+                nominatim_url = "https://nominatim.openstreetmap.org/search"
+                headers = {
+                    'User-Agent': 'CoICTCampusNav/1.0 (Django App; contact@example.com)' # Replace with actual contact
+                }
+                params = {
+                    'q': query,
+                    'format': 'json',
+                    'addressdetails': 1,
+                    'limit': 5 # Limit results from OSM
+                }
+                try:
+                    response = requests.get(nominatim_url, params=params, headers=headers, timeout=10)
+                    response.raise_for_status() # Raise an exception for HTTP errors
+                    osm_results = response.json()
+
+                    if osm_results:
+                        for item in osm_results:
+                            # Only include results that have a lat/lon
+                            if 'lat' in item and 'lon' in item:
+                                # Check if OSM result is within CoICT boundary
+                                osm_point = Point(float(item['lon']), float(item['lat']), srid=4326)
+                                if is_within_coict_boundary(osm_point):
+                                    locations_list.append({
+                                        'name': item.get('display_name', 'Unknown OSM Name'),
+                                        'latitude': float(item['lat']),
+                                        'longitude': float(item['lon']),
+                                        'address': item.get('address', {}).get('road', '') + ', ' + item.get('address', {}).get('city', ''),
+                                        'location_type': item.get('type', 'osm_general'), # Nominatim 'type' field
+                                        'description': f"OSM Result: {item.get('class', '')} - {item.get('type', '')}",
+                                        'source': 'osm_nominatim_within_campus'
+                                    })
+                                else:
+                                    # Optionally include OSM results outside campus if desired,
+                                    # but problem implies focus is on campus. For now, we'll only add if within.
+                                    # To include them, change the 'source' and add them here.
+                                    pass # logger.debug(f"OSM result '{item.get('display_name')}' is outside COICT boundary.")
+                        if not locations_list: # If OSM results were found but none were within campus
+                             message = "Found results on OpenStreetMap, but none are within the CoICT campus area."
+                    else:
+                        message = "Location not found on campus or OpenStreetMap."
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"Nominatim search request failed: {e}")
+                    message = "Could not connect to OpenStreetMap search service. Please try again later."
+                except json.JSONDecodeError:
+                    logger.error("Failed to decode JSON response from Nominatim.")
+                    message = "Error reading data from OpenStreetMap search service."
+
+    if not locations_list and not message: # If list is empty and no specific message set yet
+        if search_type_performed == "coordinate_local":
+             message = "No locations found at the specified campus coordinates."
+        else: # text_local or text_osm_fallback that yielded nothing
+             message = "Location not found on campus."
+
 
     # Save search query with metadata
     UserSearch.objects.create(
         user=request.user,
         search_query=query,
         timestamp=timezone.now(),
-        results_count=final_locations.count(), # Count after slicing for accurate results_count
-        search_type=search_type
+        results_count=len(locations_list),
+        search_type=search_type_performed
     )
     
-    # Convert coordinates for JSON response
-    locations_list = []
-    for loc in final_locations:
-        loc_dict = dict(loc)
-        if loc['coordinates']:
-            loc_dict['latitude'] = loc['coordinates'].y
-            loc_dict['longitude'] = loc['coordinates'].x
-            # If it was a coordinate search, we might have 'distance_from_query'
-            if 'distance_from_query' in loc and loc['distance_from_query'] is not None:
-                loc_dict['distance_meters'] = round(loc['distance_from_query'].m, 2)
-            del loc_dict['coordinates'] # Don't send the GEOS object
-        locations_list.append(loc_dict)
-    
-    return JsonResponse({
+    response_data = {
         'locations': locations_list,
-        'boundary_restricted': True, # All searches are boundary restricted
+        'boundary_restricted': True, # True if results are from local_db or OSM within campus
         'total_found': len(locations_list),
-        'search_type_performed': search_type
-    })
+        'search_type_performed': search_type_performed
+    }
+    if message:
+        response_data['message'] = message
+
+    return JsonResponse(response_data)
 
 @login_required
 def get_directions(request):
@@ -636,28 +695,58 @@ def get_directions(request):
                 )
             except ValueError as ve:
                 error_message = str(ve)
-                logger.error(f"ValueError from calculate_route in get_directions: {error_message}")
-                if "map data is currently unavailable or empty" in error_message:
-                    return JsonResponse({
-                        'success': False,
-                        'error': 'CoICT campus map data is currently unavailable. Please try again later.'
-                    }, status=503)
-                elif "No path found" in error_message or "Could not snap start/end points" in error_message:
-                    return JsonResponse({
-                        'success': False,
-                        'error': error_message # Use the message from the exception
-                    }, status=400)
-                else:
-                    # Generic ValueErrors from calculate_route if any other, or re-raise if preferred
-                    return JsonResponse({'success': False, 'error': error_message}, status=400)
+                logger.error(f"Routing Error in get_directions: {error_message}")
+                # Check for specific local graph unavailability message from calculate_route
+                if "CoICT campus map data is currently unavailable or empty for local routing" in error_message:
+                    user_friendly_message = "Campus-specific map data is missing or not detailed enough for routing. Please ensure OpenStreetMap has detailed campus pathways. Routing via general map services may still be available if points are outside campus or for broader routes."
+                    # Since OSRM is a fallback, this specific error implies OSRM also failed or wasn't applicable.
+                    # However, calculate_route now tries OSRM if local fails. So if this exact message leaks,
+                    # it means the very initial check in calculate_route failed.
+                    return JsonResponse({'success': False, 'error': user_friendly_message}, status=503)
+                # For other ValueErrors (likely from OSRM or other specific issues in calculate_route)
+                # pass the error message directly as it's crafted to be somewhat user-facing.
+                return JsonResponse({'success': False, 'error': error_message}, status=400)
 
-            # Add boundary validation flag to response (if route_data was populated)
-            if route_data: # Ensure route_data is not empty from a caught exception above
-                route_data['boundary_validated'] = True
-            route_data['campus_area'] = 'CoICT'
+            # This part assumes route_data is successfully populated.
+            # route_data is a list of routes, we primarily care about the first one.
+            # The 'boundary_validated' and 'campus_area' might need to be set per route if multiple routes were possible.
+            # For now, assuming calculate_route returns one route or raises error.
+
+            # Analytics and SMS sending logic - ensure route_data is not empty and is a list
+            if route_data and isinstance(route_data, list) and route_data[0]:
+                actual_route_info = route_data[0] # Get the first route's details
+                # Add source_service to the main response for clarity
+                response_payload = {
+                    'success': True,
+                    'routes': route_data,
+                    'source_service': actual_route_info.get('source_service', 'unknown')
+                }
+
+                if from_location_obj and to_location_obj: # Only log RouteRequest if using DB locations
+                    RouteRequest.objects.create(
+                        user=request.user,
+                        from_location=from_location_obj,
+                        to_location=to_location_obj,
+                        transport_mode=transport_mode,
+                        timestamp=timezone.now()
+                    )
+                    # SMS for long routes, based on the first route's summary
+                    if request.user.notifications_enabled and actual_route_info.get('summary', {}).get('totalDistance', 0) > 500:
+                        distance_km = actual_route_info.get('summary', {}).get('totalDistance',0) / 1000
+                        time_min = actual_route_info.get('summary', {}).get('totalTime',0) / 60
+                        message_sms = f"Campus route to {to_location_obj.name} is {distance_km:.1f}km. Est. time: {time_min:.0f} min."
+                        send_sms(request.user.phone_number, message_sms) # type: ignore
+                        SMSAlert.objects.create(
+                            user=request.user,
+                            message=message_sms,
+                            alert_type='navigation',
+                            is_sent=True,
+                            sent_at=timezone.now()
+                        )
+                return JsonResponse(response_payload)
             
-            # Analytics and SMS sending logic
-            if from_location_obj and to_location_obj and route_data: # Check route_data again
+            # Fallback if route_data is empty or not in expected format, though calculate_route should raise error.
+            logger.error("get_directions: route_data was empty or invalid after calculate_route call without raising ValueError.")
                 RouteRequest.objects.create(
                     user=request.user,
                     from_location=from_location_obj,

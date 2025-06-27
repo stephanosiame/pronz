@@ -1,11 +1,13 @@
 import os
 import logging # Added
+import requests # For OSRM fallback
 from shapely.wkt import loads as load_wkt # Added
 import osmnx as ox
 import networkx as nx
 from requests.exceptions import RequestException # Added for network errors
 from django.contrib.gis.geos import Polygon, LineString, Point
 from django.conf import settings
+import json # For parsing OSRM response if needed, though requests.json() handles it
 from twilio.rest import Client
 import folium
 from geopy.distance import geodesic
@@ -184,23 +186,16 @@ def calculate_route(from_location=None, to_location=None, transport_mode='walkin
     """
     Calculate route between two points, which can be Location instances or coordinate tuples.
     Coordinates are expected as (latitude, longitude).
-    Uses OSMnx graph for pathfinding within CoICT campus.
+    Uses OSMnx graph for pathfinding within CoICT campus, with OSRM as fallback.
     """
     global COICT_GRAPH
     logger.debug("Starting calculate_route function.")
 
-    if COICT_GRAPH is None or COICT_GRAPH.number_of_nodes() == 0:
-        logger.error("CoICT campus map data is currently unavailable or empty. Cannot calculate route.")
-        # The subtask asks to raise ValueError if graph is None or empty AT THE VERY BEGINNING.
-        # The initial load_coict_graph() at module level should have loaded it.
-        # If it's still None here, it means loading failed.
-        raise ValueError("CoICT campus map data is currently unavailable or empty. Cannot calculate route.")
-
     # Determine origin point and name
     if from_location:
-        origin_point = from_location.coordinates # type: ignore
-        origin_name = from_location.name # type: ignore
-        origin_id = str(from_location.location_id) # type: ignore
+        origin_point = from_location.coordinates
+        origin_name = from_location.name
+        origin_id = str(from_location.location_id)
     elif from_coordinates: # expects (latitude, longitude)
         origin_point = Point(from_coordinates[1], from_coordinates[0], srid=4326) # Point(lon, lat)
         origin_name = "Current Location"
@@ -211,9 +206,9 @@ def calculate_route(from_location=None, to_location=None, transport_mode='walkin
 
     # Determine destination point and name
     if to_location:
-        dest_point = to_location.coordinates # type: ignore
-        dest_name = to_location.name # type: ignore
-        dest_id = str(to_location.location_id) # type: ignore
+        dest_point = to_location.coordinates
+        dest_name = to_location.name
+        dest_id = str(to_location.location_id)
     elif to_coordinates: # expects (latitude, longitude)
         dest_point = Point(to_coordinates[1], to_coordinates[0], srid=4326) # Point(lon, lat)
         dest_name = "Selected Destination"
@@ -222,197 +217,162 @@ def calculate_route(from_location=None, to_location=None, transport_mode='walkin
         logger.error("Route calculation failed: Destination location or coordinates not provided.")
         raise ValueError("Either to_location or to_coordinates must be provided for the destination.")
 
-    logger.info(f"Calculating route from '{origin_name}' (Lat: {origin_point.y}, Lon: {origin_point.x}) to '{dest_name}' (Lat: {dest_point.y}, Lon: {dest_point.x}). Mode: {transport_mode}")
-
+    logger.info(f"Preparing route from '{origin_name}' ({origin_point.y}, {origin_point.x}) to '{dest_name}' ({dest_point.y}, {dest_point.x}). Mode: {transport_mode}")
 
     if not isinstance(origin_point, Point) or not isinstance(dest_point, Point):
         logger.error(f"Invalid origin or destination point type. Origin: {type(origin_point)}, Dest: {type(dest_point)}")
         raise ValueError("Origin or destination coordinates are invalid GEOS Point objects.")
 
-    # Snap points to the graph
-    origin_node, destination_node = None, None
+    # --- Attempt 1: Local OSMnx Graph Routing ---
     try:
-        logger.debug(f"Attempting to snap origin point ({origin_point.x}, {origin_point.y}) to graph.")
-        origin_node = ox.nearest_nodes(COICT_GRAPH, X=origin_point.x, Y=origin_point.y) # type: ignore
-        logger.info(f"Snapped origin point ({origin_point.y}, {origin_point.x}) to graph node ID: {origin_node}")
+        if COICT_GRAPH is None or COICT_GRAPH.number_of_nodes() == 0:
+            logger.warning("CoICT campus map data is unavailable for local routing. Will try OSRM.")
+            raise ValueError("CoICT campus map data is currently unavailable or empty for local routing.")
 
-        logger.debug(f"Attempting to snap destination point ({dest_point.x}, {dest_point.y}) to graph.")
-        destination_node = ox.nearest_nodes(COICT_GRAPH, X=dest_point.x, Y=dest_point.y) # type: ignore
-        logger.info(f"Snapped destination point ({dest_point.y}, {dest_point.x}) to graph node ID: {destination_node}")
+        logger.info("Attempting route calculation using local CoICT graph.")
+        origin_node = ox.nearest_nodes(COICT_GRAPH, X=origin_point.x, Y=origin_point.y)
+        destination_node = ox.nearest_nodes(COICT_GRAPH, X=dest_point.x, Y=dest_point.y)
+        logger.info(f"Snapped local graph nodes: Origin {origin_node}, Destination {destination_node}")
 
-    except Exception as e: # Broad exception as ox.nearest_nodes can raise various things internally
-        logger.error(f"Failed to snap origin/destination points to graph. Origin: ({origin_point.y},{origin_point.x}), Dest: ({dest_point.y},{dest_point.x}). Error: {e}")
-        raise ValueError("Could not snap start/end points to the campus map. Ensure they are within CoICT boundary and the map data is complete.") from e
-
-    # Pathfinding
-    route_node_ids = []
-    distance_meters = 0.0
-    try:
-        logger.debug(f"Calling nx.shortest_path for origin_node: {origin_node}, destination_node: {destination_node}")
-        route_node_ids = nx.shortest_path(COICT_GRAPH, source=origin_node, target=destination_node, weight='length') # type: ignore
-        distance_meters = nx.shortest_path_length(COICT_GRAPH, source=origin_node, target=destination_node, weight='length') # type: ignore
+        route_node_ids = nx.shortest_path(COICT_GRAPH, source=origin_node, target=destination_node, weight='length')
+        distance_meters = nx.shortest_path_length(COICT_GRAPH, source=origin_node, target=destination_node, weight='length')
 
         route_path_coords = []
-        for node_id in route_node_ids:
-            node_data = COICT_GRAPH.nodes[node_id]
+        for node_id_val in route_node_ids:
+            node_data = COICT_GRAPH.nodes[node_id_val]
             route_path_coords.append((node_data['y'], node_data['x'])) # (lat, lon)
 
-    except nx.NetworkXNoPath:
-        logger.warning(f"No path found between {origin_name} (Node {origin_node}) and {dest_name} (Node {destination_node}) on the campus map.")
-        raise ValueError(f"No path found between the specified locations ('{origin_name}' to '{dest_name}') on the campus map.")
-    except Exception as e: # Catch other potential errors from NetworkX or data issues
-        logger.error(f"Error during NetworkX shortest_path calculation between {origin_node} and {destination_node}: {e}")
-        raise ValueError("An unexpected error occurred while trying to find the shortest path on the campus map.") from e
+        speed_multipliers = {'walking': 1.4, 'cycling': 4.2, 'driving': 11.1}
+        speed = speed_multipliers.get(transport_mode, 1.4)
+        duration_seconds = int(distance_meters / speed) if speed > 0 else float('inf')
 
-    # Estimate time based on transport mode (using actual path distance)
-    speed_multipliers = {
-        'walking': 1.4,    # m/s (average walking speed)
-        'cycling': 4.2,    # m/s (approx 15 km/h)
-        'driving': 11.1    # m/s (approx 40 km/h, campus speed)
-    }
-    speed = speed_multipliers.get(transport_mode, 1.4) # Default to walking speed
-    estimated_time_minutes = int(distance_meters / speed / 60) if speed > 0 else float('inf')
-    duration_seconds = int(distance_meters / speed) if speed > 0 else float('inf')
+        logger.info(f"Local graph route: Distance: {distance_meters:.2f}m, Duration: {duration_seconds}s")
 
-    logger.info(f"Successfully calculated route: Distance: {distance_meters:.2f}m, Est. Time: {estimated_time_minutes} min ({duration_seconds}s)")
+        # Generate detailed steps for local graph route
+        local_steps = []
+        if len(route_node_ids) >= 2:
+            current_distance_agg = 0.0
+            current_duration_agg = 0
+            for i in range(len(route_node_ids) - 1):
+                u, v = route_node_ids[i], route_node_ids[i+1]
+                edge_data = COICT_GRAPH.get_edge_data(u, v, 0)
+                segment_length = edge_data.get('length', 0) if edge_data else 0.0
+                segment_duration = int(segment_length / speed) if speed > 0 else float('inf')
 
-    route_data = {
-        'source': {
-            'id': origin_id,
-            'name': origin_name,
-            'coordinates': {'lat': origin_point.y, 'lng': origin_point.x} # Original point
-        },
-        'destination': {
-            'id': dest_id,
-            'name': dest_name,
-            'coordinates': {'lat': dest_point.y, 'lng': dest_point.x} # Original point
-        },
-        'path': route_path_coords, # Path from graph
-        'distance': round(distance_meters, 2),
-        'estimated_time': estimated_time_minutes, # Based on graph path
-        'duration': duration_seconds,
-        'steps': [] # Placeholder, will be populated below
-    }
+                path_description = "path segment"
+                # ... (rest of step generation logic from original code, simplified here for brevity)
+                street_name_parts = []
+                if edge_data:
+                    name_attr = edge_data.get('name')
+                    if isinstance(name_attr, list): street_name_parts.extend(name_attr)
+                    elif isinstance(name_attr, str): street_name_parts.append(name_attr)
+                    highway_attr = edge_data.get('highway')
+                    if isinstance(highway_attr, list): street_name_parts.extend([h for h in highway_attr if h not in street_name_parts])
+                    elif isinstance(highway_attr, str) and highway_attr not in street_name_parts: street_name_parts.append(highway_attr)
+                    if street_name_parts: path_description = ", ".join(filter(None, street_name_parts))
 
-    # Generate detailed steps
-    if len(route_node_ids) < 2:
-        # This case should ideally not happen if a path is found, but handle defensively
-        route_data['steps'].append({ # type: ignore
-            'instruction': f"Proceed from {origin_name} to {dest_name}.",
-            'distance': route_data['distance'],
-            'duration': route_data['duration'],
-            'node_start': origin_node,
-            'node_end': destination_node
-        })
-    else:
-        current_distance = 0.0
-        current_duration = 0
-        for i in range(len(route_node_ids) - 1):
-            u = route_node_ids[i]
-            v = route_node_ids[i+1]
+                instruction = f"Proceed along {path_description}."
+                if i < len(route_node_ids) - 2:
+                    next_edge_data = COICT_GRAPH.get_edge_data(route_node_ids[i+1], route_node_ids[i+2], 0)
+                    next_street_name_parts = []
+                    if next_edge_data:
+                        next_name_attr = next_edge_data.get('name')
+                        if isinstance(next_name_attr, list): next_street_name_parts.extend(next_name_attr)
+                        elif isinstance(next_name_attr, str): next_street_name_parts.append(next_name_attr)
+                    if next_street_name_parts and next_street_name_parts[0] != path_description.split(", ")[0]:
+                        instruction += f" Then turn onto {', '.join(filter(None,next_street_name_parts))}."
 
-            edge_data = COICT_GRAPH.get_edge_data(u, v, 0) # type: ignore # Get data for key 0
-            segment_length = edge_data.get('length', 0) if edge_data else 0.0
-            segment_duration = int(segment_length / speed) if speed > 0 else float('inf')
-
-            street_name_parts = []
-            path_description = "path segment" # Default description
-            if edge_data:
-                name_attr = edge_data.get('name')
-                if isinstance(name_attr, list):
-                    street_name_parts.extend(name_attr)
-                elif isinstance(name_attr, str):
-                    street_name_parts.append(name_attr)
-
-                highway_attr = edge_data.get('highway')
-                if isinstance(highway_attr, list):
-                    street_name_parts.extend([h for h in highway_attr if h not in street_name_parts])
-                elif isinstance(highway_attr, str) and highway_attr not in street_name_parts:
-                    street_name_parts.append(highway_attr)
-
-                if street_name_parts:
-                    path_description = ", ".join(filter(None, street_name_parts))
+                local_steps.append({
+                    'instruction': instruction,
+                    'distance': round(segment_length, 2),
+                    'duration': segment_duration,
+                    'street_name': path_description if street_name_parts else "Unnamed Path"
+                })
+            if local_steps: # Add final instruction towards destination
+                 local_steps[-1]['instruction'] += f" towards {dest_name}."
 
 
-            instruction = f"Proceed along {path_description}."
-            # More detailed instruction if it's not the last segment
-            if i < len(route_node_ids) - 2:
-                 # Try to get name of next segment for better instruction
-                next_edge_data = COICT_GRAPH.get_edge_data(route_node_ids[i+1], route_node_ids[i+2], 0) # type: ignore
-                next_street_name_parts = []
-                if next_edge_data:
-                    next_name_attr = next_edge_data.get('name')
-                    if isinstance(next_name_attr, list): next_street_name_parts.extend(next_name_attr)
-                    elif isinstance(next_name_attr, str): next_street_name_parts.append(next_name_attr)
+        lrm_route = {
+            'name': f"Route from {origin_name} to {dest_name} (Campus Graph)",
+            'summary': {'totalDistance': round(distance_meters, 2), 'totalTime': duration_seconds},
+            'coordinates': route_path_coords,
+            'waypoints': [[origin_point.y, origin_point.x], [dest_point.y, dest_point.x]],
+            'instructions': [{'text': s['instruction'], 'distance': s['distance'], 'time': s['duration']} for s in local_steps],
+            'source_service': 'local_graph'
+        }
+        logger.info(f"Successfully calculated route via local CoICT graph.")
+        return [lrm_route]
 
-                if next_street_name_parts and next_street_name_parts[0] != path_description.split(", ")[0] : # if current and next street names differ
-                    instruction += f" Then turn onto {', '.join(filter(None,next_street_name_parts))}."
+    except (ValueError, nx.NetworkXNoPath, Exception) as local_route_error:
+        logger.warning(f"Local graph routing failed: {local_route_error}. Attempting OSRM fallback.")
+        # Fall through to OSRM attempt
+        pass
 
+    # --- Attempt 2: OSRM Fallback ---
+    logger.info(f"Attempting OSRM fallback for route from '{origin_name}' to '{dest_name}'.")
+    # Use 'walking' for OSRM as per problem, adapt transport_mode if OSRM service/profile changes
+    osrm_profile = 'foot' # OSRM profile for walking
+    if transport_mode == 'cycling': osrm_profile = 'bike'
+    elif transport_mode == 'driving': osrm_profile = 'car'
 
-            route_data['steps'].append({ # type: ignore
-                'instruction': instruction,
-                'distance': round(segment_length, 2),
-                'duration': segment_duration,
-                'node_start': u,
-                'node_end': v,
-                'street_name': path_description if street_name_parts else "Unnamed Path"
-            })
-            current_distance += segment_length
-            current_duration += segment_duration
+    osrm_base_url = f"http://router.project-osrm.org/route/v1/{osrm_profile}/"
+    start_coords_osrm = f"{origin_point.x},{origin_point.y}" # lon,lat
+    end_coords_osrm = f"{dest_point.x},{dest_point.y}"   # lon,lat
+    osrm_url = f"{osrm_base_url}{start_coords_osrm};{end_coords_osrm}?overview=full&steps=true&geometries=geojson"
 
-        # Final step instruction towards destination name
-        if route_data['steps']:
-            final_step_instruction = f"Continue towards {dest_name}."
-            if "then turn onto" not in route_data['steps'][-1]['instruction'].lower(): # type: ignore
-                 route_data['steps'][-1]['instruction'] += f" towards {dest_name}." # type: ignore
-            else: # if previous instruction already had a turn, add a new simpler step.
-                 route_data['steps'].append({ # type: ignore
-                    'instruction': final_step_instruction,
-                    'distance': 0, # distance already covered by previous segment
-                    'duration': 0, # duration already covered
-                    'node_start': route_node_ids[-1] if route_node_ids else destination_node, # last node
-                    'node_end': destination_node,
-                    'street_name': "Destination Area"
-                 })
+    headers = {'User-Agent': 'CoICTCampusNav/1.0 (Django App)'} # Simple User-Agent
 
+    try:
+        response = requests.get(osrm_url, headers=headers, timeout=15)
+        response.raise_for_status() # Raises HTTPError for bad responses (4XX or 5XX)
+        osrm_data = response.json()
 
-        # Update total distance and duration based on summed segments
-        route_data['distance'] = round(current_distance, 2)
-        route_data['duration'] = int(current_duration)
-        route_data['estimated_time'] = int(current_duration / 60) if current_duration != float('inf') else float('inf')
+        if osrm_data.get('code') == 'Ok' and osrm_data.get('routes'):
+            osrm_route_obj = osrm_data['routes'][0]
 
-    logger.debug(f"Original route_data calculated: {route_data}")
+            distance_meters_osrm = osrm_route_obj.get('distance', 0.0)
+            duration_seconds_osrm = osrm_route_obj.get('duration', 0.0)
 
-    # Adapt to Leaflet Routing Machine IRoute format
-    lrm_instructions = []
-    for step in route_data.get('steps', []):
-        lrm_instructions.append({
-            'text': step.get('instruction', ''),
-            'distance': step.get('distance', 0), # Ensure this is 'distance' from your step
-            'time': step.get('duration', 0)    # Ensure this is 'duration' from your step (in seconds)
-        })
+            osrm_geometry = osrm_route_obj.get('geometry', {}).get('coordinates', [])
+            # OSRM GeoJSON is [lon, lat], LRM expects [lat, lon]
+            route_path_coords_osrm = [[coord[1], coord[0]] for coord in osrm_geometry]
 
-    lrm_summary = {
-        'totalDistance': route_data.get('distance', 0),       # Already in meters
-        'totalTime': route_data.get('duration', 0)            # Already in seconds
-    }
+            lrm_instructions_osrm = []
+            for leg in osrm_route_obj.get('legs', []):
+                for step in leg.get('steps', []):
+                    lrm_instructions_osrm.append({
+                        'text': step.get('maneuver', {}).get('instruction', 'Proceed on path'),
+                        'distance': round(step.get('distance', 0),1),
+                        'time': round(step.get('duration', 0),1)
+                    })
 
-    # Waypoints for LRM: needs actual start and end coordinates used for routing
-    # These were derived from from_location/to_location or from_coordinates/to_coordinates
-    # origin_point and dest_point are GEOS Points (lon, lat)
-    lrm_from_coords = [origin_point.y, origin_point.x] if origin_point else [] # lat, lon
-    lrm_to_coords = [dest_point.y, dest_point.x] if dest_point else []       # lat, lon
+            final_lrm_route = {
+                'name': f"Route from {origin_name} to {dest_name} (via OSRM)",
+                'summary': {'totalDistance': round(distance_meters_osrm, 2), 'totalTime': round(duration_seconds_osrm, 2)},
+                'coordinates': route_path_coords_osrm,
+                'waypoints': [[origin_point.y, origin_point.x], [dest_point.y, dest_point.x]],
+                'instructions': lrm_instructions_osrm,
+                'source_service': 'osrm_fallback'
+            }
+            logger.info(f"Successfully calculated route via OSRM: Distance: {distance_meters_osrm:.2f}m")
+            return [final_lrm_route]
+        else:
+            error_message = osrm_data.get('message', "OSRM could not find a route or returned an unexpected status.")
+            logger.error(f"OSRM routing unsuccessful: {error_message} (Code: {osrm_data.get('code')})")
+            raise ValueError(f"Map Error: {error_message}") # Generic message for user
 
-    lrm_route = {
-        'name': f"Route from {origin_name} to {dest_name}", # Using names derived earlier
-        'summary': lrm_summary,
-        'coordinates': route_data.get('path', []), # Already list of [lat, lon]
-        'waypoints': [lrm_from_coords, lrm_to_coords],
-        'instructions': lrm_instructions
-    }
-
-    logger.info(f"Adapted route for LRM: {lrm_route['name']}, waypoints: {lrm_route['waypoints']}")
-    return [lrm_route] # Return as a list of routes
+    except requests.exceptions.Timeout:
+        logger.error(f"OSRM request timed out: {osrm_url}")
+        raise ValueError("Map service (OSRM) request timed out. Please try again.")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"OSRM request failed: {e}")
+        raise ValueError(f"Could not connect to map service (OSRM). Please check internet connection and try again.")
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
+        logger.error(f"Error parsing OSRM response: {e}")
+        raise ValueError("Failed to understand route data from map service (OSRM).")
+    except Exception as e: # Catch-all for other unexpected errors from OSRM block
+        logger.error(f"Unexpected error during OSRM routing: {e}", exc_info=True)
+        raise ValueError("An unexpected error occurred with the external map service (OSRM).")
 
 
 def generate_random_route(from_point, to_point):
