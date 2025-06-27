@@ -18,6 +18,7 @@ beautifulsoup4==4.13.4 # If used
 sqlparse==0.5.3 # Django dependency
 asgiref==3.8.1 # Django dependency
 geopy # Added for distance calculations
+django-leaflet # For map widgets in Django Admin
 # Keep other direct dependencies if they seem core to the app's described features
 # For example, if reportlab or gdown are confirmed as used.
 # For now, focusing on the core GIS and Django web app functionality.

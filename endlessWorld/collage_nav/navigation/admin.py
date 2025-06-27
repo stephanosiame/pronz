@@ -61,6 +61,7 @@ admin.site.register(UserLocation) # Kept for now
 
 
 from django.contrib.gis import admin as gis_admin # Use alias to avoid conflict if regular 'admin' is used a lot
+from leaflet.admin import LeafletGeoAdmin # Import LeafletGeoAdmin
 
 # --- Constants for CoICT Campus Map Default View in Admin ---
 # Ideally, these would be imported from a central settings/constants file
@@ -103,12 +104,34 @@ class LocationAdmin(gis_admin.GISModelAdmin): # Inherit from GISModelAdmin (OSMG
     default_lon = COICT_CENTER_LON_ADMIN
     default_zoom = 16 # A bit more zoomed in for better detail initially
 
-@gis_admin.register(NavigationRoute)
-class NavigationRouteAdmin(gis_admin.GISModelAdmin):
-    list_display = ('route_id', 'source_location', 'destination_location', 'distance', 'estimated_time', 'is_accessible')
-    search_fields = ('source_location__name', 'destination_location__name')
-    list_filter = ('is_accessible', 'difficulty_level')
-    # route_path will automatically use the map widget from GISModelAdmin
+@admin.register(NavigationRoute) # Use standard admin.register
+class NavigationRouteAdmin(LeafletGeoAdmin): # Inherit from LeafletGeoAdmin to use map widget for route_path
+    list_display = ('name', 'route_id', 'source_location', 'destination_location', 'distance', 'estimated_time', 'is_active', 'is_accessible', 'difficulty_level')
+    search_fields = ('name', 'description', 'source_location__name', 'destination_location__name')
+    list_filter = ('is_active', 'is_accessible', 'difficulty_level')
+    # The 'route_path' field (LineStringField) will automatically use the Leaflet map widget for drawing,
+    # thanks to inheriting from LeafletGeoAdmin.
+
+    fieldsets = (
+        (None, {
+            'fields': ('name', 'description', 'is_active', 'is_accessible', 'difficulty_level')
+        }),
+        ('Route Details', {
+            'fields': ('source_location', 'destination_location', 'route_path', 'distance', 'estimated_time')
+        }),
+        ('Metadata', {
+            'fields': ('route_id', 'created_at',),
+            'classes': ('collapse',) # Keep metadata collapsed by default
+        }),
+    )
+    readonly_fields = ('route_id', 'created_at')
+
+
+    # Optional: Customize Leaflet settings specifically for this admin page if needed
+    # settings_overrides = {
+    #     'DEFAULT_CENTER': (COICT_CENTER_LAT_ADMIN, COICT_CENTER_LON_ADMIN),
+    #     'DEFAULT_ZOOM': 17,
+    # }
 
 # @gis_admin.register(SMSAlert) # Use gis_admin if SMSAlert had GeoDjango fields, otherwise admin.register
 # class SMSAlertAdmin(admin.ModelAdmin): # If not a GeoDjango model, use admin.ModelAdmin
