@@ -80,9 +80,8 @@ COICT_CENTER_LON_ADMIN = 39.24001333969674
 #     readonly_fields = ('date_joined', 'last_login')
 
 # The @gis_admin.register(Location) decorator handles unregistering if Location was previously registered.
-@gis_admin.register(Location)
-
-class LocationAdmin(gis_admin.GISModelAdmin): # Inherit from GISModelAdmin (OSMGeoAdmin is removed in Django 4+)
+@gis_admin.register(Location) # Or @admin.register(Location) if using LeafletGeoAdmin for a non-GIS specific model admin
+class LocationAdmin(LeafletGeoAdmin): # Inherit from LeafletGeoAdmin
     list_display = ('name', 'location_type', 'address', 'floor_level', 'is_accessible', 'updated_at')
     search_fields = ('name', 'address', 'description', 'location_type')
     list_filter = ('location_type', 'is_accessible', 'floor_level')
