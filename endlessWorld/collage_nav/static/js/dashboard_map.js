@@ -102,6 +102,7 @@ window.initCustomMapLogic = function(generatedMapId) {
 
     startWatchingPosition();
     loadAndDisplayGeofences();
+    loadAndDisplayAdminRoutes(); // Load admin-defined routes
 
     const movingMarkerScript = document.createElement('script');
     movingMarkerScript.src = LEAFLET_MOVINGMARKER_JS_URL;
@@ -605,4 +606,67 @@ document.addEventListener('DOMContentLoaded', function() {
     // const finishDrawBtn = document.getElementById('finishDrawRouteBtn'); if (finishDrawBtn) finishDrawBtn.disabled = true; // REMOVED
     // const cancelDrawBtn = document.getElementById('cancelDrawRouteBtn'); if (cancelDrawBtn) cancelDrawBtn.disabled = true; // REMOVED
 });
+
+let adminRoutesLayerGroup = null; // Layer group to hold admin-defined routes for easy management
+
+/**
+ * Fetches admin-defined routes from the API and displays them on the map.
+ * Routes are drawn as polylines with popups showing their details.
+ */
+function loadAndDisplayAdminRoutes() {
+    if (!ensureMapInstance()) {
+        console.error("Map instance not available for loading admin routes.");
+        return;
+    }
+
+    // Initialize or clear the layer group for admin routes.
+    // This ensures that if the function is called again, old routes are removed before drawing new ones.
+    if (adminRoutesLayerGroup && mapInstance.hasLayer(adminRoutesLayerGroup)) {
+        adminRoutesLayerGroup.clearLayers();
+    } else {
+        adminRoutesLayerGroup = L.layerGroup().addTo(mapInstance);
+    }
+
+    // Fetch routes from the API endpoint (URL provided by Django template).
+    const adminRoutesUrl = typeof DYNAMIC_ADMIN_ROUTES_URL !== 'undefined' ? DYNAMIC_ADMIN_ROUTES_URL : "/api/admin-routes/";
+
+    fetch(adminRoutesUrl)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Network response was not ok: ${response.status} ${response.statusText}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (data.success && data.routes && data.routes.length > 0) {
+                data.routes.forEach(route => {
+                    if (route.path_coordinates && route.path_coordinates.length > 0) {
+                        const polyline = L.polyline(route.path_coordinates, {
+                            color: '#3388ff', // Blue color for admin routes (Leaflet default blue)
+                            weight: 5,
+                            opacity: 0.7,
+                            // dashArray: '10, 5' // Optional: make them dashed
+                        }).addTo(adminRoutesLayerGroup); // Add to the layer group
+
+                        let popupContent = `<b>${route.name || 'Admin Route'}</b>`;
+                        if (route.description) {
+                            popupContent += `<br>${route.description}`;
+                        }
+                        popupContent += `<br><small>Distance: ${route.distance}m, Time: ${route.estimated_time} min</small>`;
+                        polyline.bindPopup(popupContent);
+                    }
+                });
+                console.log(`${data.routes.length} admin-defined routes loaded.`);
+            } else if (data.success && data.routes.length === 0) {
+                console.log("No admin-defined routes found or returned.");
+            } else {
+                console.error("Failed to load admin routes:", data.error || "Unknown error from API");
+            }
+        })
+        .catch(error => {
+            console.error('Error fetching admin-defined routes:', error);
+            // Optionally, notify the user via an alert or a message on the page
+            // alert("Could not load predefined campus routes. Please try again later.");
+        });
+}
 [end of endlessWorld/collage_nav/static/js/dashboard_map.js]
