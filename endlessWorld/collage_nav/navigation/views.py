@@ -11,7 +11,7 @@ from django.db.models import Q, F
 from django.contrib.gis.geos import Point, Polygon
 from django.contrib.gis.measure import Distance
 from django.contrib.gis.db.models.functions import Distance as DistanceFunction
-from django.contrib.gis.geos import GEOSGeometry, GEOSException # Added for area search
+from django.contrib.gis.geos import GEOSGeometry, GEOSException, LineString # Added for area search and admin routes
 from django.utils import timezone
 from datetime import datetime, timedelta
 import json
@@ -1296,3 +1296,68 @@ def get_locations_in_area(request):
     except Exception as e:
         logger.error(f"Unexpected error in get_locations_in_area: {e}", exc_info=True)
         return JsonResponse({'success': False, 'error': 'An unexpected server error occurred.'}, status=500)
+
+@login_required # Or remove if routes are public
+@require_http_methods(["GET"])
+def get_admin_defined_routes(request):
+    """
+    API endpoint to fetch navigation routes defined in the Django admin.
+
+    Method: GET
+    URL: /api/admin-routes/
+    Requires Login: Yes (can be changed if routes are public)
+
+    Successful JSON Response (200 OK):
+        {
+            "success": True,
+            "routes": [
+                {
+                    "route_id": "uuid-string",
+                    "name": "Route Name (if model has it)",
+                    "description": "Route description (if model has it)",
+                    "path_coordinates": [[lat1, lon1], [lat2, lon2], ...], // from LineStringField
+                    "distance": 1200.50, // meters
+                    "estimated_time": 15, // minutes
+                    "is_accessible": true,
+                    "difficulty_level": "medium"
+                },
+                // ... other routes
+            ]
+        }
+    Error JSON Response (e.g., 500 Internal Server Error):
+        {
+            "success": False,
+            "error": "Error message."
+        }
+    """
+    try:
+        # Only fetch active routes
+        routes_qs = NavigationRoute.objects.filter(is_active=True)
+
+        routes_data = []
+        for route in routes_qs:
+            path_coords = []
+            if route.route_path and isinstance(route.route_path, LineString):
+                # route_path is a LineString, its coords are (lon, lat) tuples
+                # Leaflet Polyline expects [lat, lon]
+                path_coords = [[point[1], point[0]] for point in route.route_path.coords]
+
+            routes_data.append({
+                'route_id': str(route.route_id),
+                'name': route.name if route.name else f"Route {route.route_id[:8]}",
+                'description': route.description if route.description else '',
+                'path_coordinates': path_coords,
+                'distance': route.distance,
+                'estimated_time': route.estimated_time,
+                'is_accessible': route.is_accessible,
+                'difficulty_level': route.difficulty_level,
+                # Add other relevant fields from NavigationRoute model here
+                # 'source_location_name': route.source_location.name if route.source_location else None,
+                # 'destination_location_name': route.destination_location.name if route.destination_location else None,
+            })
+
+        return JsonResponse({'success': True, 'routes': routes_data})
+
+    except Exception as e:
+        logger.error(f"Error in get_admin_defined_routes: {e}", exc_info=True)
+        return JsonResponse({'success': False, 'error': 'Failed to retrieve admin-defined routes.'}, status=500)

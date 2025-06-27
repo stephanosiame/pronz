@@ -101,18 +101,25 @@ class NavigationRoute(models.Model):
     source_location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='routes_from')
     destination_location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='routes_to')
     route_path = models.LineStringField()
-    distance = models.FloatField()  # in meters
-    estimated_time = models.IntegerField()  # in minutes
+    distance = models.FloatField(help_text="in meters")  # in meters
+    estimated_time = models.IntegerField(help_text="in minutes")  # in minutes
     difficulty_level = models.CharField(
         max_length=10,
         choices=[('easy', 'Easy'), ('medium', 'Medium'), ('hard', 'Hard')],
         default='easy'
     )
-    is_accessible = models.BooleanField(default=True)
+    is_accessible = models.BooleanField(default=True, help_text="Is this route accessible for users with disabilities?")
     created_at = models.DateTimeField(auto_now_add=True)
+
+    # New fields for better admin management and display
+    name = models.CharField(max_length=200, blank=True, null=True, help_text="Optional name for this route (e.g., 'Main Library to Block A')")
+    description = models.TextField(blank=True, null=True, help_text="Optional description for this route.")
+    is_active = models.BooleanField(default=True, help_text="Is this route currently active and usable?")
     
     def __str__(self):
-        return f"{self.source_location.name} → {self.destination_location.name}"
+        if self.name:
+            return self.name
+        return f"Route from {self.source_location.name if self.source_location else 'Unknown'} to {self.destination_location.name if self.destination_location else 'Unknown'} ({self.route_id})"
 
 class UserSearch(models.Model):
     user = models.ForeignKey(CustomUser, on_delete=models.CASCADE)

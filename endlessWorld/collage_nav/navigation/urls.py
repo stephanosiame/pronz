@@ -20,6 +20,7 @@ urlpatterns = [
     path('api/get-last-user-location/', views.get_last_user_location, name='get_last_user_location'),
     path('api/geofences/', views.api_get_geofences, name='api_get_geofences'),
     path('api/locations-in-area/', views.get_locations_in_area, name='get_locations_in_area'), # New API for area search
+    path('api/admin-routes/', views.get_admin_defined_routes, name='get_admin_defined_routes'), # API for admin-defined routes
 
     # Notification API endpoints
     path('api/notifications/unread_count/', views.get_unread_notification_count, name='get_unread_notification_count'),

@@ -20,6 +20,7 @@ INSTALLED_APPS = [
     'crispy_forms',
     'crispy_bootstrap5',
     'navigation',
+    'leaflet',  # Added django-leaflet
 ]
 
 MIDDLEWARE = [
@@ -100,6 +101,27 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:8000",
     "http://127.0.0.1:8081",
 ]
+
+# Leaflet Configuration
+LEAFLET_CONFIG = {
+    'DEFAULT_CENTER': (-6.7712, 39.2400),  # CoICT Campus approximate center
+    'DEFAULT_ZOOM': 16,
+    'MIN_ZOOM': 3,
+    'MAX_ZOOM': 20,
+    'TILES': 'OpenStreetMap',  # Default tile layer
+    # 'TILES': [('OpenStreetMap', 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {'attribution': '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'})],
+    # Add other tile layers if needed, e.g., satellite
+    # 'TILES': [
+    #     ('OpenStreetMap', '//{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    #      {'attribution': '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'}),
+    #     ('Satellite', 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    #      {'attribution': 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA FSA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'})
+    # ],
+    'SCALE': 'metric', # Options: 'metric', 'imperial', 'both'
+    'ATTRIBUTION_PREFIX': 'CoICT Navigation App', # Optional
+    # 'SRID': 4326, # Default is 4326, ensure your geometries match
+    # 'RESET_VIEW': True, # Show a reset view button on the map
+}
 
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
