@@ -684,9 +684,9 @@ def get_directions(request):
                 }, status=400)
 
             # Calculate route
-            route_data = {} # Initialize route_data
+            route_data_list = []
             try:
-                route_data = calculate_route(
+                route_data_list = calculate_route( # Renamed to route_data_list
                     from_location=from_location_obj,
                     to_location=to_location_obj,
                     transport_mode=transport_mode,
@@ -695,34 +695,23 @@ def get_directions(request):
                 )
             except ValueError as ve:
                 error_message = str(ve)
-                logger.error(f"Routing Error in get_directions: {error_message}")
+                logger.error(f"Routing Error in get_directions: {error_message}", exc_info=True) # Added exc_info
                 # Check for specific local graph unavailability message from calculate_route
                 if "CoICT campus map data is currently unavailable or empty for local routing" in error_message:
                     user_friendly_message = "Campus-specific map data is missing or not detailed enough for routing. Please ensure OpenStreetMap has detailed campus pathways. Routing via general map services may still be available if points are outside campus or for broader routes."
-                    # Since OSRM is a fallback, this specific error implies OSRM also failed or wasn't applicable.
-                    # However, calculate_route now tries OSRM if local fails. So if this exact message leaks,
-                    # it means the very initial check in calculate_route failed.
                     return JsonResponse({'success': False, 'error': user_friendly_message}, status=503)
                 # For other ValueErrors (likely from OSRM or other specific issues in calculate_route)
-                # pass the error message directly as it's crafted to be somewhat user-facing.
                 return JsonResponse({'success': False, 'error': error_message}, status=400)
 
-            # This part assumes route_data is successfully populated.
-            # route_data is a list of routes, we primarily care about the first one.
-            # The 'boundary_validated' and 'campus_area' might need to be set per route if multiple routes were possible.
-            # For now, assuming calculate_route returns one route or raises error.
-
-            # Analytics and SMS sending logic - ensure route_data is not empty and is a list
-            if route_data and isinstance(route_data, list) and route_data[0]:
-                actual_route_info = route_data[0] # Get the first route's details
-                # Add source_service to the main response for clarity
+            if route_data_list and isinstance(route_data_list, list) and route_data_list[0]:
+                actual_route_info = route_data_list[0]
                 response_payload = {
                     'success': True,
-                    'routes': route_data,
+                    'routes': route_data_list,
                     'source_service': actual_route_info.get('source_service', 'unknown')
                 }
 
-                if from_location_obj and to_location_obj: # Only log RouteRequest if using DB locations
+                if from_location_obj and to_location_obj:
                     RouteRequest.objects.create(
                         user=request.user,
                         from_location=from_location_obj,
@@ -730,12 +719,11 @@ def get_directions(request):
                         transport_mode=transport_mode,
                         timestamp=timezone.now()
                     )
-                    # SMS for long routes, based on the first route's summary
                     if request.user.notifications_enabled and actual_route_info.get('summary', {}).get('totalDistance', 0) > 500:
                         distance_km = actual_route_info.get('summary', {}).get('totalDistance',0) / 1000
                         time_min = actual_route_info.get('summary', {}).get('totalTime',0) / 60
                         message_sms = f"Campus route to {to_location_obj.name} is {distance_km:.1f}km. Est. time: {time_min:.0f} min."
-                        send_sms(request.user.phone_number, message_sms) # type: ignore
+                        send_sms(request.user.phone_number, message_sms)
                         SMSAlert.objects.create(
                             user=request.user,
                             message=message_sms,
@@ -744,37 +732,14 @@ def get_directions(request):
                             sent_at=timezone.now()
                         )
                 return JsonResponse(response_payload)
-            
-            # Fallback if route_data is empty or not in expected format, though calculate_route should raise error.
-            logger.error("get_directions: route_data was empty or invalid after calculate_route call without raising ValueError.")
-                RouteRequest.objects.create(
-                    user=request.user,
-                    from_location=from_location_obj,
-                    to_location=to_location_obj,
-                    transport_mode=transport_mode,
-                    timestamp=timezone.now()
-                )
-                if request.user.notifications_enabled and route_data.get('distance', 0) > 500:
-                    message = f"Campus route to {to_location_obj.name} is {route_data.get('distance', 0):.0f}m. Estimated time: {route_data.get('estimated_time', 0)} minutes."
-                    send_sms(request.user.phone_number, message) # type: ignore
-                    SMSAlert.objects.create(
-                        user=request.user, 
-                        message=message, 
-                        alert_type='navigation', 
-                        is_sent=True, 
-                        sent_at=timezone.now()
-                    )
-
-            if not route_data: # Should have been handled by specific ValueError catch, but as a safeguard
-                 logger.error("Route calculation resulted in empty route_data without raising specific ValueError.")
-                 return JsonResponse({'success': False, 'error': 'Failed to calculate route due to an unexpected issue.'}, status=500)
-
-            # Ensure route_data is a list, as expected by LRM (calculate_route now returns a list)
-            # The key in JsonResponse is changed from 'route' to 'routes'
-            return JsonResponse({'success': True, 'routes': route_data})
+            else:
+                # This case should ideally be caught by ValueErrors in calculate_route
+                # But as a safeguard if calculate_route returns empty/invalid without error:
+                logger.error("get_directions: calculate_route did not return valid route data or an exception.")
+                return JsonResponse({'success': False, 'error': 'Failed to calculate route due to an unexpected internal issue.'}, status=500)
 
         except Location.DoesNotExist:
-            logger.warning(f"Location.DoesNotExist in get_directions for user {request.user.id}")
+            logger.warning(f"Location.DoesNotExist in get_directions for user {request.user.id}", exc_info=True)
             return JsonResponse({'success': False, 'error': 'Origin or destination location not found within campus boundary.'}, status=404)
         except ValueError as ve: # Catches ValueErrors raised BEFORE calculate_route (e.g., param validation)
             logger.warning(f"ValueError before calculate_route in get_directions: {str(ve)}")
