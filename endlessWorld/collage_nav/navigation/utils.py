@@ -122,6 +122,47 @@ def load_coict_graph():
 # Consider application-level control for this potentially long operation.
 load_coict_graph()
 
+# --- Boundary Helper Functions ---
+# These were originally in views.py, moved here for centralized access.
+# They rely on COICT_CENTER_LAT, COICT_CENTER_LON, COICT_BOUNDS_OFFSET,
+# and COICT_BOUNDARY_POLYGON defined above in this file.
+
+# Helper to generate STRICT_BOUNDS from constants, used by is_within_coict_boundary
+STRICT_BOUNDS = [
+    [COICT_CENTER_LAT - COICT_BOUNDS_OFFSET, COICT_CENTER_LON - COICT_BOUNDS_OFFSET],  # SW corner
+    [COICT_CENTER_LAT + COICT_BOUNDS_OFFSET, COICT_CENTER_LON + COICT_BOUNDS_OFFSET]   # NE corner
+]
+
+def is_within_coict_boundary(point: Point) -> bool:
+    """
+    Check if a GEOS Point is within the defined COICT campus boundary.
+    Uses STRICT_BOUNDS for a quick rectangular check.
+    """
+    if not point or not isinstance(point, Point):
+        return False
+
+    # Ensure point has SRID, default to 4326 if not (though ideally it should match COICT_BOUNDARY_POLYGON's SRID)
+    # For this simple bounds check, SRID matching isn't strictly enforced here but is good practice for .contains()
+    # if not point.srid:
+    #     point.srid = 4326
+
+    lat, lon = point.y, point.x
+    return (
+        STRICT_BOUNDS[0][0] <= lat <= STRICT_BOUNDS[1][0] and
+        STRICT_BOUNDS[0][1] <= lon <= STRICT_BOUNDS[1][1]
+    )
+    # For a more precise check against the actual polygon:
+    # return COICT_BOUNDARY_POLYGON.contains(point)
+    # However, the views.py version used STRICT_BOUNDS, so keeping that logic.
+
+def filter_locations_by_boundary(locations_queryset):
+    """
+    Filter a queryset of Location models to only include those
+    whose 'coordinates' field is within the COICT_BOUNDARY_POLYGON.
+    """
+    return locations_queryset.filter(coordinates__within=COICT_BOUNDARY_POLYGON)
+# --- End Boundary Helper Functions ---
+
 def send_sms(phone_number, message):
     """Send SMS using Twilio"""
     try:
