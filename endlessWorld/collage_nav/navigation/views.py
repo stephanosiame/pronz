@@ -26,47 +26,25 @@ import folium
 from folium import plugins
 from .models import *
 from .forms import *
-from .utils import send_sms, calculate_route
+# Updated utils import
+from .utils import (
+    send_sms,
+    calculate_route,
+    is_within_coict_boundary,
+    filter_locations_by_boundary,
+    COICT_BOUNDARY_POLYGON, # Import if directly used by remaining views, or rely on functions
+    STRICT_BOUNDS, # Import if directly used by remaining views
+    COICT_CENTER_LAT, # Import if directly used by remaining views
+    COICT_CENTER_LON  # Import if directly used by remaining views
+)
+
 
 # Logger instance
 logger = logging.getLogger(__name__)
 
-# --- Constants for CoICT Campus Boundaries ---
-COICT_CENTER_LAT = -6.771204359255421
-COICT_CENTER_LON = 39.24001333969674
-# Offset in degrees. 0.002 degrees is approx 222 meters.
-# This creates a square boundary.
-COICT_BOUNDS_OFFSET = 0.003
-
-STRICT_BOUNDS = [
-    [COICT_CENTER_LAT - COICT_BOUNDS_OFFSET, COICT_CENTER_LON - COICT_BOUNDS_OFFSET],  # SW corner
-    [COICT_CENTER_LAT + COICT_BOUNDS_OFFSET, COICT_CENTER_LON + COICT_BOUNDS_OFFSET]   # NE corner
-]
-
-# Create boundary polygon for spatial queries
-COICT_BOUNDARY_POLYGON = Polygon.from_bbox([
-    COICT_CENTER_LON - COICT_BOUNDS_OFFSET,  # min_x (west)
-    COICT_CENTER_LAT - COICT_BOUNDS_OFFSET,  # min_y (south)
-    COICT_CENTER_LON + COICT_BOUNDS_OFFSET,  # max_x (east)
-    COICT_CENTER_LAT + COICT_BOUNDS_OFFSET   # max_y (north)
-])
-COICT_BOUNDARY_POLYGON.srid = 4326
-# --- End Constants ---
-
-def is_within_coict_boundary(point):
-    """Check if a point is within the COICT boundary"""
-    if not point:
-        return False
-    
-    lat, lon = point.y, point.x
-    return (
-        STRICT_BOUNDS[0][0] <= lat <= STRICT_BOUNDS[1][0] and
-        STRICT_BOUNDS[0][1] <= lon <= STRICT_BOUNDS[1][1]
-    )
-
-def filter_locations_by_boundary(locations_queryset):
-    """Filter locations to only include those within COICT boundary"""
-    return locations_queryset.filter(coordinates__within=COICT_BOUNDARY_POLYGON)
+# Constants and helper functions like COICT_CENTER_LAT, COICT_CENTER_LON, COICT_BOUNDS_OFFSET,
+# STRICT_BOUNDS, COICT_BOUNDARY_POLYGON, is_within_coict_boundary, filter_locations_by_boundary
+# have been moved to utils.py and are imported above.
 
 def home(request):
     """Home page - redirect to dashboard if authenticated"""
@@ -435,183 +413,6 @@ def dashboard_view(request):
     }
     
     return render(request, 'dashboard.html', context)
-
-@login_required
-def search_locations(request):
-    """
-    Search for locations within COICT boundary.
-    Can search by text (name, description, type, address) or by coordinates.
-    
-    Query Parameters:
-        q (str): The search query.
-                 For text search: e.g., "Library"
-                 For coordinate search: e.g., "-6.7712,39.2400" (latitude,longitude)
-
-    Returns:
-        JsonResponse:
-            - locations (list): List of found locations with details.
-                                If coordinate search, includes 'distance_meters'.
-            - boundary_restricted (bool): Always true.
-            - total_found (int): Number of locations returned (max 15).
-            - search_type_performed (str): "text" or "coordinate".
-            - message (str, optional): Message for empty/invalid queries.
-    """
-    query = request.GET.get('q', '').strip()
-    locations_qs = Location.objects.none() # Start with an empty queryset
-    query = request.GET.get('q', '').strip()
-    search_type_performed = "text_local" # Initial assumption
-    locations_list = []
-    message = None
-
-    if not query:
-        return JsonResponse({'locations': [], 'message': 'Query is empty.', 'total_found': 0, 'search_type_performed': 'empty_query'})
-
-    # Attempt to parse query as "lat,lon" for coordinate-based search first
-    try:
-        if ',' in query:
-            lat_str, lon_str = query.split(',')
-            lat = float(lat_str.strip())
-            lon = float(lon_str.strip())
-
-            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                raise ValueError("Latitude or longitude out of range.")
-
-            search_point = Point(lon, lat, srid=4326)
-            search_type_performed = "coordinate_local"
-
-            if not is_within_coict_boundary(search_point):
-                message = 'Queried coordinates are outside CoICT campus boundary.'
-            else:
-                # Search local DB for locations near this point within COICT boundary
-                locations_qs = filter_locations_by_boundary(Location.objects.all()).filter(
-                    coordinates__distance_lte=(search_point, Distance(m=100))
-                ).annotate(
-                    distance_from_query=DistanceFunction('coordinates', search_point)
-                ).order_by('distance_from_query')
-
-                db_locations = locations_qs.values(
-                    'location_id', 'name', 'location_type',
-                    'description', 'address', 'coordinates'
-                )[:15]
-
-                for loc in db_locations:
-                    loc_dict = dict(loc)
-                    if loc['coordinates']:
-                        loc_dict['latitude'] = loc['coordinates'].y
-                        loc_dict['longitude'] = loc['coordinates'].x
-                        if 'distance_from_query' in loc and loc['distance_from_query'] is not None:
-                            loc_dict['distance_meters'] = round(loc['distance_from_query'].m, 2)
-                        del loc_dict['coordinates']
-                    loc_dict['source'] = 'local_db'
-                    locations_list.append(loc_dict)
-        else:
-            # Fallback to text search if not coordinate format
-            raise ValueError("Not a coordinate string, proceed to text search.")
-
-    except ValueError: # Handles non-coordinate queries or parsing errors
-        search_type_performed = "text_local"
-        if len(query) < 2:
-            message = 'Text query too short (minimum 2 characters).'
-        else:
-            # Perform text search against local Location model (campus only)
-            boundary_locations = filter_locations_by_boundary(Location.objects.all())
-            locations_qs = boundary_locations.filter(
-                Q(name__icontains=query) |
-                Q(description__icontains=query) |
-                Q(location_type__icontains=query) |
-                Q(address__icontains=query)
-            )
-            db_locations = locations_qs.values(
-                'location_id', 'name', 'location_type',
-                'description', 'address', 'coordinates'
-            )[:15]
-
-            for loc in db_locations:
-                loc_dict = dict(loc)
-                if loc['coordinates']:
-                    loc_dict['latitude'] = loc['coordinates'].y
-                    loc_dict['longitude'] = loc['coordinates'].x
-                    del loc_dict['coordinates']
-                loc_dict['source'] = 'local_db'
-                locations_list.append(loc_dict)
-
-            # If no results from local DB text search, try Nominatim
-            if not locations_list:
-                search_type_performed = "text_osm_fallback"
-                logger.info(f"Local search for '{query}' yielded no results. Trying Nominatim OSM search.")
-                nominatim_url = "https://nominatim.openstreetmap.org/search"
-                headers = {
-                    'User-Agent': 'CoICTCampusNav/1.0 (Django App; contact@example.com)' # Replace with actual contact
-                }
-                params = {
-                    'q': query,
-                    'format': 'json',
-                    'addressdetails': 1,
-                    'limit': 5 # Limit results from OSM
-                }
-                try:
-                    response = requests.get(nominatim_url, params=params, headers=headers, timeout=10)
-                    response.raise_for_status() # Raise an exception for HTTP errors
-                    osm_results = response.json()
-
-                    if osm_results:
-                        for item in osm_results:
-                            # Only include results that have a lat/lon
-                            if 'lat' in item and 'lon' in item:
-                                # Check if OSM result is within CoICT boundary
-                                osm_point = Point(float(item['lon']), float(item['lat']), srid=4326)
-                                if is_within_coict_boundary(osm_point):
-                                    locations_list.append({
-                                        'name': item.get('display_name', 'Unknown OSM Name'),
-                                        'latitude': float(item['lat']),
-                                        'longitude': float(item['lon']),
-                                        'address': item.get('address', {}).get('road', '') + ', ' + item.get('address', {}).get('city', ''),
-                                        'location_type': item.get('type', 'osm_general'), # Nominatim 'type' field
-                                        'description': f"OSM Result: {item.get('class', '')} - {item.get('type', '')}",
-                                        'source': 'osm_nominatim_within_campus'
-                                    })
-                                else:
-                                    # Optionally include OSM results outside campus if desired,
-                                    # but problem implies focus is on campus. For now, we'll only add if within.
-                                    # To include them, change the 'source' and add them here.
-                                    pass # logger.debug(f"OSM result '{item.get('display_name')}' is outside COICT boundary.")
-                        if not locations_list: # If OSM results were found but none were within campus
-                             message = "Found results on OpenStreetMap, but none are within the CoICT campus area."
-                    else:
-                        message = "Location not found on campus or OpenStreetMap."
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"Nominatim search request failed: {e}")
-                    message = "Could not connect to OpenStreetMap search service. Please try again later."
-                except json.JSONDecodeError:
-                    logger.error("Failed to decode JSON response from Nominatim.")
-                    message = "Error reading data from OpenStreetMap search service."
-
-    if not locations_list and not message: # If list is empty and no specific message set yet
-        if search_type_performed == "coordinate_local":
-             message = "No locations found at the specified campus coordinates."
-        else: # text_local or text_osm_fallback that yielded nothing
-             message = "Location not found on campus."
-
-
-    # Save search query with metadata
-    UserSearch.objects.create(
-        user=request.user,
-        search_query=query,
-        timestamp=timezone.now(),
-        results_count=len(locations_list),
-        search_type=search_type_performed
-    )
-    
-    response_data = {
-        'locations': locations_list,
-        'boundary_restricted': True, # True if results are from local_db or OSM within campus
-        'total_found': len(locations_list),
-        'search_type_performed': search_type_performed
-    }
-    if message:
-        response_data['message'] = message
-
-    return JsonResponse(response_data)
 
 @login_required
 def get_directions(request):
@@ -1353,136 +1154,7 @@ def get_locations_in_area(request):
         logger.error(f"Unexpected error in get_locations_in_area: {e}", exc_info=True)
         return JsonResponse({'success': False, 'error': 'An unexpected server error occurred.'}, status=500)
 
-@login_required # Or remove if routes are public
-@require_http_methods(["GET"])
-def get_admin_defined_routes(request):
-    """
-    API endpoint to fetch navigation routes defined in the Django admin.
-
-    Method: GET
-    URL: /api/admin-routes/
-    Requires Login: Yes (can be changed if routes are public)
-
-    Successful JSON Response (200 OK):
-        {
-            "success": True,
-            "routes": [
-                {
-                    "route_id": "uuid-string",
-                    "name": "Route Name (if model has it)",
-                    "description": "Route description (if model has it)",
-                    "path_coordinates": [[lat1, lon1], [lat2, lon2], ...], // from LineStringField
-                    "distance": 1200.50, // meters
-                    "estimated_time": 15, // minutes
-                    "is_accessible": true,
-                    "difficulty_level": "medium"
-                },
-                // ... other routes
-            ]
-        }
-    Error JSON Response (e.g., 500 Internal Server Error):
-        {
-            "success": False,
-            "error": "Error message."
-        }
-    """
-    try:
-        # Only fetch active routes
-        routes_qs = NavigationRoute.objects.filter(is_active=True)
-
-        routes_data = []
-        for route in routes_qs:
-            path_coords = []
-            if route.route_path and isinstance(route.route_path, LineString):
-                # route_path is a LineString, its coords are (lon, lat) tuples
-                # Leaflet Polyline expects [lat, lon]
-                path_coords = [[point[1], point[0]] for point in route.route_path.coords]
-
-            routes_data.append({
-                'route_id': str(route.route_id),
-                'name': route.name if route.name else f"Route {route.route_id[:8]}",
-                'description': route.description if route.description else '',
-                'path_coordinates': path_coords,
-                'distance': route.distance,
-                'estimated_time': route.estimated_time,
-                'is_accessible': route.is_accessible,
-                'difficulty_level': route.difficulty_level,
-                # Add other relevant fields from NavigationRoute model here
-                # 'source_location_name': route.source_location.name if route.source_location else None,
-                # 'destination_location_name': route.destination_location.name if route.destination_location else None,
-            })
-
-        return JsonResponse({'success': True, 'routes': routes_data})
-
-    except Exception as e:
-        logger.error(f"Error in get_admin_defined_routes: {e}", exc_info=True)
-        return JsonResponse({'success': False, 'error': 'Failed to retrieve admin-defined routes.'}, status=500)
-
-# Add this new view function
-def search_campus_routes_view(request):
-    """
-    Search for predefined campus routes from coict_routes.geojson.
-    Query Parameters:
-        q (str): The search query (e.g., "Area 1", "Route 5", or "1", "5").
-    Returns:
-        JsonResponse:
-            - route (dict): GeoJSON feature of the found route.
-            - message (str, optional): Message for empty/invalid queries or if not found.
-    """
-    query = request.GET.get('q', '').strip().lower()
-    found_route = None
-    message = None
-
-    if not query:
-        return JsonResponse({'route': None, 'message': 'Query is empty.'}, status=400)
-
-    # Construct the path to the GeoJSON file
-    # Assumes this views.py is in endlessWorld/collage_nav/navigation/
-    # settings.BASE_DIR typically points to endlessWorld/collage_nav/
-    # The file is in navigation/data/coict_routes.geojson
-    file_path = os.path.join(settings.BASE_DIR, 'navigation', 'data', 'coict_routes.geojson')
-
-    if not os.path.exists(file_path):
-        logger.error(f"GeoJSON file not found at {file_path}")
-        return JsonResponse({'route': None, 'message': 'Route data file not found. Please contact admin.'}, status=500)
-
-    try:
-        with open(file_path, 'r') as f:
-            geojson_data = json.load(f)
-
-        features = geojson_data.get('features', [])
-
-        for feature in features:
-            properties = feature.get('properties', {})
-            area_prop = str(properties.get('area', '')).lower()
-            desc_prop = str(properties.get('description', '')).lower()
-
-            # Try to match query as area number or full description
-            # e.g., query "1" should match area 1, query "route 1" should match description "Route 1"
-            # Also allow searching by just the number part of description, e.g. query "1" for "Route 1"
-            if query == area_prop or query == desc_prop or query == desc_prop.replace("route ", ""):
-                found_route = feature
-                break
-            # Allow searching by just the number if query is "1" and area is 1
-            if query.isdigit() and area_prop.isdigit() and int(query) == int(area_prop):
-                found_route = feature
-                break
-
-
-        if not found_route:
-            message = f"No route found for query: '{request.GET.get('q', '')}'."
-            status_code = 404
-        else:
-            status_code = 200
-
-        return JsonResponse({'route': found_route, 'message': message}, status=status_code)
-
-    except json.JSONDecodeError:
-        logger.error(f"Error decoding GeoJSON file: {file_path}")
-        return JsonResponse({'route': None, 'message': 'Error reading route data file.'}, status=500)
-    except Exception as e:
-        logger.error(f"Unexpected error in search_campus_routes_view: {e}", exc_info=True)
-        return JsonResponse({'route': None, 'message': f'An unexpected server error occurred: {str(e)}'}, status=500)
+# search_campus_routes_view MOVED to search_views.py
 
 from django.contrib.auth.decorators import login_required # Ensure this is imported
 
