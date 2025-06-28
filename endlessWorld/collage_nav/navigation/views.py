@@ -137,7 +137,7 @@ def verify_token_view(request, user_id):
     
     return render(request, 'verify_token.html', {'form': form, 'user': user})
 
-def generate_restricted_campus_map(user_location=None, nearby_locations=None, defined_bounds=None, campus_routes_features=None):
+def generate_restricted_campus_map(user_location=None, nearby_locations=None, defined_bounds=None):
     """Generate a restricted campus map using Folium for CoICT-UDSM with strict bounds"""
     
     if defined_bounds is None:
@@ -326,18 +326,6 @@ def generate_restricted_campus_map(user_location=None, nearby_locations=None, de
     """
     campus_map.get_root().html.add_child(folium.Element(map_css))
 
-    # Add predefined campus routes if provided
-    if campus_routes_features:
-        for route_feature in campus_routes_features:
-            route_name = route_feature.get("properties", {}).get("description", "Campus Route")
-            area_num = route_feature.get("properties", {}).get("area", "N/A")
-            folium.GeoJson(
-                route_feature, # This is the individual GeoJSON feature (LineString)
-                name=f"Route: {route_name}",
-                tooltip=f"<b>{route_name}</b> (Area: {area_num})",
-                style_function=lambda x: {'color': 'purple', 'weight': 4, 'opacity': 0.75} # Changed color for visibility
-            ).add_to(campus_map)
-
     # Add Layer Control
     folium.LayerControl().add_to(campus_map)
     
@@ -396,26 +384,12 @@ def dashboard_view(request):
         user=request.user,
         results_count__gt=0
     ).order_by('-timestamp')[:5]
-
-    # Load campus routes data
-    campus_routes_geojson_features = []
-    geojson_file_path = os.path.join(settings.BASE_DIR, 'navigation', 'data', 'coict_routes.geojson')
-    try:
-        if os.path.exists(geojson_file_path):
-            with open(geojson_file_path, 'r') as f:
-                routes_data = json.load(f)
-                campus_routes_geojson_features = routes_data.get('features', [])
-        else:
-            logger.warning(f"Campus routes GeoJSON file not found at {geojson_file_path}")
-    except Exception as e:
-        logger.error(f"Error loading or parsing campus routes GeoJSON: {e}")
-
+    
     # Generate restricted campus map
     map_data = generate_restricted_campus_map(
         user_location, 
         nearby_locations_list, 
-        defined_bounds=current_strict_bounds,
-        campus_routes_features=campus_routes_geojson_features # Pass the loaded routes
+        defined_bounds=current_strict_bounds
     )
     
     # Get user preferences
