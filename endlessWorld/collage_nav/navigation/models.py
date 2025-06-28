@@ -167,6 +167,7 @@ class SMSAlert(models.Model):
         ('profile_update', 'Profile Update'),
         ('password_changed', 'Password Changed'),
         ('notification', 'General Notification'),
+        ('campus_direction', 'Campus Direction'), # Added new alert type
     )
     
     alert_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
