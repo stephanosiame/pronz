@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Search Campus Routes</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+        .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        input[type="text"] { padding: 10px; margin-right: 5px; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 10px 15px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+        #results { margin-top: 20px; padding: 10px; border: 1px solid #eee; border-radius: 4px; background-color: #e9ecef; }
+        pre { white-space: pre-wrap; word-wrap: break-word; background-color: #fff; padding: 10px; border-radius: 4px; }
+        .error { color: red; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Search Predefined Campus Routes</h1>
+        <form id="searchForm">
+            <input type="text" id="searchQuery" name="q" placeholder="Enter Area or Route name (e.g., Area 1, 1, Route 5)">
+            <button type="submit">Search</button>
+        </form>
+        <div id="results">
+            <p>Search results will appear here.</p>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('searchForm').addEventListener('submit', function(event) {
+            event.preventDefault();
+            const query = document.getElementById('searchQuery').value;
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<p>Searching...</p>';
+
+            fetch(`/api/campus-routes/search/?q=${encodeURIComponent(query)}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.route) {
+                        resultsDiv.innerHTML = `
+                            <h3>Route Found: ${data.route.properties.description} (Area ${data.route.properties.area})</h3>
+                            <p><strong>GeoJSON Feature:</strong></p>
+                            <pre>${JSON.stringify(data.route, null, 2)}</pre>
+                        `;
+                    } else {
+                        resultsDiv.innerHTML = `<p class="error">Error: ${data.message || 'No route found.'}</p>`;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    resultsDiv.innerHTML = `<p class="error">An error occurred while fetching data.</p>`;
+                });
+        });
+    </script>
+</body>
+</html>

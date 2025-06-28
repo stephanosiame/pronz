@@ -17,6 +17,8 @@ from datetime import datetime, timedelta
 import json
 import logging # Added
 import requests # For Nominatim OSM Search
+import os
+from django.conf import settings
 from django.core.serializers import serialize
 import random
 import string
@@ -1415,3 +1417,183 @@ def get_admin_defined_routes(request):
     except Exception as e:
         logger.error(f"Error in get_admin_defined_routes: {e}", exc_info=True)
         return JsonResponse({'success': False, 'error': 'Failed to retrieve admin-defined routes.'}, status=500)
+
+# Add this new view function
+def search_campus_routes_view(request):
+    """
+    Search for predefined campus routes from coict_routes.geojson.
+    Query Parameters:
+        q (str): The search query (e.g., "Area 1", "Route 5", or "1", "5").
+    Returns:
+        JsonResponse:
+            - route (dict): GeoJSON feature of the found route.
+            - message (str, optional): Message for empty/invalid queries or if not found.
+    """
+    query = request.GET.get('q', '').strip().lower()
+    found_route = None
+    message = None
+
+    if not query:
+        return JsonResponse({'route': None, 'message': 'Query is empty.'}, status=400)
+
+    # Construct the path to the GeoJSON file
+    # Assumes this views.py is in endlessWorld/collage_nav/navigation/
+    # settings.BASE_DIR typically points to endlessWorld/collage_nav/
+    # The file is in navigation/data/coict_routes.geojson
+    file_path = os.path.join(settings.BASE_DIR, 'navigation', 'data', 'coict_routes.geojson')
+
+    if not os.path.exists(file_path):
+        logger.error(f"GeoJSON file not found at {file_path}")
+        return JsonResponse({'route': None, 'message': 'Route data file not found. Please contact admin.'}, status=500)
+
+    try:
+        with open(file_path, 'r') as f:
+            geojson_data = json.load(f)
+
+        features = geojson_data.get('features', [])
+
+        for feature in features:
+            properties = feature.get('properties', {})
+            area_prop = str(properties.get('area', '')).lower()
+            desc_prop = str(properties.get('description', '')).lower()
+
+            # Try to match query as area number or full description
+            # e.g., query "1" should match area 1, query "route 1" should match description "Route 1"
+            # Also allow searching by just the number part of description, e.g. query "1" for "Route 1"
+            if query == area_prop or query == desc_prop or query == desc_prop.replace("route ", ""):
+                found_route = feature
+                break
+            # Allow searching by just the number if query is "1" and area is 1
+            if query.isdigit() and area_prop.isdigit() and int(query) == int(area_prop):
+                found_route = feature
+                break
+
+
+        if not found_route:
+            message = f"No route found for query: '{request.GET.get('q', '')}'."
+            status_code = 404
+        else:
+            status_code = 200
+
+        return JsonResponse({'route': found_route, 'message': message}, status=status_code)
+
+    except json.JSONDecodeError:
+        logger.error(f"Error decoding GeoJSON file: {file_path}")
+        return JsonResponse({'route': None, 'message': 'Error reading route data file.'}, status=500)
+    except Exception as e:
+        logger.error(f"Unexpected error in search_campus_routes_view: {e}", exc_info=True)
+        return JsonResponse({'route': None, 'message': f'An unexpected server error occurred: {str(e)}'}, status=500)
+
+from django.contrib.auth.decorators import login_required # Ensure this is imported
+
+@login_required
+def get_campus_directions_view(request):
+    """
+    Provides directions based on predefined campus routes from coict_routes.geojson.
+    Currently, this basic version only returns the route if start and end are the same,
+    or if only one of from_route/to_route is provided (effectively a search).
+
+    Query Parameters:
+        from_route (str): The name/identifier of the starting route (e.g., "Area 1", "1").
+        to_route (str): The name/identifier of the ending route (e.g., "Area 5", "5").
+    Returns:
+        JsonResponse:
+            - route (dict): GeoJSON feature of the route if applicable.
+            - message (str): Informational message.
+    """
+    from_route_query = request.GET.get('from_route', '').strip().lower()
+    to_route_query = request.GET.get('to_route', '').strip().lower()
+
+    if not from_route_query and not to_route_query:
+        return JsonResponse({'route': None, 'message': 'Please provide at least a starting or ending route.'}, status=400)
+
+    target_query = None
+    descriptive_query_for_message = "" # Store the original query for messages
+
+    if from_route_query and not to_route_query:
+        target_query = from_route_query
+        descriptive_query_for_message = request.GET.get('from_route', '')
+        message_prefix = f"Displaying route for '{descriptive_query_for_message}'"
+    elif not from_route_query and to_route_query:
+        target_query = to_route_query
+        descriptive_query_for_message = request.GET.get('to_route', '')
+        message_prefix = f"Displaying route for '{descriptive_query_for_message}'"
+    elif from_route_query == to_route_query:
+        target_query = from_route_query
+        descriptive_query_for_message = request.GET.get('from_route', '')
+        message_prefix = f"Route from '{descriptive_query_for_message}' to '{request.GET.get('to_route', '')}' (same route)"
+    else: # from_route_query and to_route_query are different
+        return JsonResponse({
+            'route': None,
+            'message': "Multi-segment routing between different predefined campus routes is not yet supported. " \
+                       "Please specify the same start and end route to view its path, or provide only one route."
+        }, status=400)
+
+    file_path = os.path.join(settings.BASE_DIR, 'navigation', 'data', 'coict_routes.geojson')
+    if not os.path.exists(file_path):
+        logger.error(f"GeoJSON file not found at {file_path} in get_campus_directions_view")
+        return JsonResponse({'route': None, 'message': 'Route data file not found. Please contact admin.'}, status=500)
+
+    try:
+        with open(file_path, 'r') as f:
+            geojson_data = json.load(f)
+
+        features = geojson_data.get('features', [])
+        found_route_feature = None
+
+        for feature in features:
+            properties = feature.get('properties', {})
+            area_prop = str(properties.get('area', '')).lower()
+            desc_prop = str(properties.get('description', '')).lower()
+
+            if target_query == area_prop or target_query == desc_prop or target_query == desc_prop.replace("route ", ""):
+                found_route_feature = feature
+                break
+            if target_query.isdigit() and area_prop.isdigit() and int(target_query) == int(area_prop):
+                found_route_feature = feature
+                break
+
+        if found_route_feature:
+            # SMS Sending Logic
+            if request.user.is_authenticated and hasattr(request.user, 'notifications_enabled') and request.user.notifications_enabled:
+                if hasattr(request.user, 'phone_number') and request.user.phone_number:
+                    route_name = found_route_feature.get("properties", {}).get("description", "selected campus route")
+                    sms_message_text = f"CoICT Nav: Details for {route_name} are ready in the app. {message_prefix}."
+                    if len(sms_message_text) > 160: # Basic check for SMS length
+                        sms_message_text = f"CoICT Nav: Details for {route_name} are ready in the app."
+
+                    sms_sent_successfully = send_sms(request.user.phone_number, sms_message_text)
+                    SMSAlert.objects.create(
+                        user=request.user,
+                        message=sms_message_text,
+                        alert_type='campus_direction', # New alert type
+                        is_sent=sms_sent_successfully,
+                        sent_at=timezone.now() if sms_sent_successfully else None
+                    )
+
+            return JsonResponse({
+                'route': found_route_feature,
+                'message': f"{message_prefix}."
+            }, status=200)
+        else:
+            return JsonResponse({
+                'route': None,
+                'message': f"The specified route '{descriptive_query_for_message}' was not found in the campus route data."
+            }, status=404)
+
+    except json.JSONDecodeError:
+        logger.error(f"Error decoding GeoJSON file: {file_path} in get_campus_directions_view")
+        return JsonResponse({'route': None, 'message': 'Error reading route data file.'}, status=500)
+    except Exception as e:
+        logger.error(f"Unexpected error in get_campus_directions_view: {e}", exc_info=True)
+        return JsonResponse({'route': None, 'message': f'An unexpected server error occurred: {str(e)}'}, status=500)
+
+@login_required # Or remove if public access is desired
+def page_search_campus_routes(request):
+    """Renders the HTML page for searching campus routes."""
+    return render(request, 'navigation/search_campus_form.html')
+
+@login_required # Or remove if public access is desired
+def page_get_campus_directions(request):
+    """Renders the HTML page for getting campus directions."""
+    return render(request, 'navigation/directions_campus_form.html')
