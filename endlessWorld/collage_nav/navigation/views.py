@@ -1597,3 +1597,35 @@ def page_search_campus_routes(request):
 def page_get_campus_directions(request):
     """Renders the HTML page for getting campus directions."""
     return render(request, 'navigation/directions_campus_form.html')
+
+@login_required
+def view_all_campus_paths(request):
+    """
+    Displays all CampusPath objects on a Leaflet map.
+    """
+    campus_paths = CampusPath.objects.all()
+
+    # We need to pass the GeoJSON data in a format that JavaScript can easily use.
+    # The geojson_feature field in CampusPath already stores this.
+    # We'll pass the whole list of paths to the template.
+    # The template's JS will then iterate and add each GeoJSON feature to the map.
+
+    # Serialize entire CampusPath objects, or just the geojson_feature part.
+    # Passing the whole objects might be useful if we want to display names/descriptions too.
+    # For now, let's pass them as a list of dictionaries, taking what's needed.
+
+    paths_data = []
+    for path in campus_paths:
+        paths_data.append({
+            'id': path.path_id,
+            'name': path.name,
+            'area_id': path.area_id,
+            'description': path.description,
+            'geojson_feature': path.geojson_feature # This is the crucial part
+        })
+
+    context = {
+        'campus_paths_data': json.dumps(paths_data), # Convert to JSON string for easy JS parsing
+        'page_title': "All Campus Paths"
+    }
+    return render(request, 'navigation/view_all_campus_paths.html', context)

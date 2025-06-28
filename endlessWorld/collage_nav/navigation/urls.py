@@ -11,6 +11,7 @@ urlpatterns = [
     path('profile/', views.profile_view, name='profile'),
     path('password-reset/', views.password_reset_request, name='password_reset_request'),
     path('password-reset/verify/<int:user_id>/', views.password_reset_verify, name='password_reset_verify'),
+    path('view-all-campus-paths/', views.view_all_campus_paths, name='view_all_campus_paths'), # New page for viewing all paths
     
     # API endpoints
     path('api/search/', views.search_locations, name='search_locations'), # General location search
