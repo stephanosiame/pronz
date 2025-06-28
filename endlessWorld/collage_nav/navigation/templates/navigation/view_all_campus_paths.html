@@ -1,0 +1,268 @@
+{% extends "base.html" %}
+
+{% block title %}
+    {{ page_title|default:"View All Campus Paths" }} - CoICT Navigation
+{% endblock %}
+
+{% block head_extra %}
+    {{ super }}
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""></script>
+    <style>
+        #map {
+            height: 70vh; /* Adjust as needed */
+            width: 100%;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+        }
+        .path-info {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-radius: 8px;
+        }
+        .path-info h3 {
+            margin-top: 0;
+        }
+    </style>
+{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2 class="mb-3">{{ page_title|default:"All Campus Paths" }}</h2>
+
+    <div id="map"></div>
+
+    <div id="selectedPathInfo" class="path-info" style="display:none;">
+        <h3>Path Details</h3>
+        <p><strong>Name:</strong> <span id="pathName"></span></p>
+        <p><strong>Area ID:</strong> <span id="pathAreaId"></span></p>
+        <p><strong>Description:</strong> <span id="pathDescription"></span></p>
+    </div>
+
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        // Default center for CoICT campus (approximate)
+        const coictCenter = [-6.7712, 39.2400];
+        const map = L.map('map').setView(coictCenter, 17); // Zoom level 17
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        const campusPathsData = JSON.parse('{{ campus_paths_data|escapejs }}');
+        let allPathLayers = [];
+
+        if (campusPathsData && campusPathsData.length > 0) {
+            campusPathsData.forEach(function(pathData) {
+                if (pathData.geojson_feature && pathData.geojson_feature.geometry) {
+                    try {
+                        const geoJsonLayer = L.geoJSON(pathData.geojson_feature, {
+                            style: function (feature) {
+                                // You can style based on properties if needed
+                                return {
+                                    color: "#3388ff", // Default blue
+                                    weight: 5,
+                                    opacity: 0.7
+                                };
+                            },
+                            onEachFeature: function (feature, layer) {
+                                let popupContent = `<b>${pathData.name || 'N/A'}</b>`;
+                                if (pathData.description) {
+                                    popupContent += `<br>${pathData.description}`;
+                                }
+                                if (pathData.area_id) {
+                                    popupContent += `<br>Area: ${pathData.area_id}`;
+                                }
+                                layer.bindPopup(popupContent);
+
+                                // Store reference for click handling
+                                layer.pathData = pathData;
+                            }
+                        }).addTo(map);
+                        allPathLayers.push(geoJsonLayer);
+                    } catch (e) {
+                        console.error("Error adding GeoJSON feature for path:", pathData.name, e);
+                    }
+                }
+            });
+
+            // Fit map to bounds of all loaded paths if any were loaded
+            if (allPathLayers.length > 0) {
+                const group = new L.featureGroup(allPathLayers);
+                map.fitBounds(group.getBounds().pad(0.1)); // Add some padding
+            }
+        } else {
+            console.log("No campus paths data to display.");
+            // Optionally display a message on the map or page
+            const noDataMarker = L.marker(coictCenter).addTo(map);
+            noDataMarker.bindPopup("No campus paths data available to display.").openPopup();
+        }
+
+        // Optional: Display path info on click
+        const pathNameEl = document.getElementById('pathName');
+        const pathAreaIdEl = document.getElementById('pathAreaId');
+        const pathDescriptionEl = document.getElementById('pathDescription');
+        const selectedPathInfoDiv = document.getElementById('selectedPathInfo');
+        let highlightedLayer = null;
+
+        allPathLayers.forEach(groupLayer => {
+            groupLayer.on('click', function(e) {
+                const clickedLayer = e.layer; // The specific LineString clicked
+                const data = clickedLayer.pathData;
+
+                if (pathNameEl && data) {
+                    pathNameEl.textContent = data.name || 'N/A';
+                    pathAreaIdEl.textContent = data.area_id || 'N/A';
+                    pathDescriptionEl.textContent = data.geojson_feature.properties.description || data.description || 'N/A';
+                    selectedPathInfoDiv.style.display = 'block';
+                }
+
+                // Highlight clicked path
+                if (highlightedLayer) {
+                    highlightedLayer.setStyle({ color: '#3388ff', weight: 5, opacity: 0.7 }); // Reset previous
+                }
+                clickedLayer.setStyle({ color: 'red', weight: 7, opacity: 1 });
+                highlightedLayer = clickedLayer;
+
+                // Do not fit bounds on click if user location is active, to avoid jarring map jumps
+                if (!isTracking) { // Only fit bounds if not actively tracking user location
+                    map.fitBounds(clickedLayer.getBounds().pad(0.1));
+                }
+            });
+        });
+
+        // --- User Location ---
+        let userLocationMarker = null;
+        let userLocationAccuracyCircle = null;
+        let locationWatchId = null;
+        let isTracking = false;
+        const toggleLocationButton = L.control({position: 'topleft'});
+
+        toggleLocationButton.onAdd = function (map) {
+            const div = L.DomUtil.create('div', 'leaflet-bar leaflet-control leaflet-control-custom');
+            div.innerHTML = '<a href="#" title="Toggle My Location" role="button" aria-label="Toggle My Location">📍</a>';
+            div.style.backgroundColor = 'white';
+            div.style.width = '30px';
+            div.style.height = '30px';
+            div.style.textAlign = 'center';
+            div.style.lineHeight = '30px';
+            div.style.cursor = 'pointer';
+
+            L.DomEvent.on(div, 'click', function (e) {
+                L.DomEvent.stop(e); // prevent map click
+                toggleTracking();
+            });
+            return div;
+        };
+        toggleLocationButton.addTo(map);
+
+        function updateLocationMarker(lat, lon, accuracy) {
+            const userLatLng = L.latLng(lat, lon);
+            if (!userLocationMarker) {
+                userLocationMarker = L.marker(userLatLng, {
+                    icon: L.divIcon({
+                        className: 'user-location-marker',
+                        html: '<div style="background-color: #2A93EE; width: 16px; height: 16px; border-radius: 50%; border: 2px solid white; box-shadow: 0 0 5px #000;"></div>',
+                        iconSize: [20, 20],
+                        iconAnchor: [10, 10]
+                    })
+                }).addTo(map);
+                userLocationMarker.bindPopup("Your current location").openPopup();
+            } else {
+                userLocationMarker.setLatLng(userLatLng);
+            }
+
+            if (!userLocationAccuracyCircle) {
+                userLocationAccuracyCircle = L.circle(userLatLng, {
+                    radius: accuracy,
+                    weight: 1,
+                    color: '#136AEC',
+                    fillColor: '#136AEC',
+                    fillOpacity: 0.15
+                }).addTo(map);
+            } else {
+                userLocationAccuracyCircle.setLatLng(userLatLng);
+                userLocationAccuracyCircle.setRadius(accuracy);
+            }
+        }
+
+        function handleLocationSuccess(position) {
+            const lat = position.coords.latitude;
+            const lon = position.coords.longitude;
+            const accuracy = position.coords.accuracy; // Accuracy in meters
+
+            updateLocationMarker(lat, lon, accuracy);
+
+            if (isTracking) { // Only pan if tracking was just enabled or explicitly requested
+                 map.setView([lat, lon], Math.max(map.getZoom(), 17)); // Pan to user, keep zoom or zoom in
+            }
+        }
+
+        function handleLocationError(error) {
+            console.warn(`Geolocation error: ${error.message}`);
+            let message = "Could not get your location.";
+            if (error.code === 1) message = "Location access denied. Please enable it in your browser settings.";
+            if (userLocationMarker) userLocationMarker.getPopup().setContent(message);
+            else L.popup().setLatLng(map.getCenter()).setContent(message).openOn(map);
+            stopTracking(); // Stop if there's an error
+        }
+
+        function startTracking() {
+            if (navigator.geolocation) {
+                if (locationWatchId) navigator.geolocation.clearWatch(locationWatchId); // Clear any existing watch
+
+                // Get current position once first for immediate feedback
+                navigator.geolocation.getCurrentPosition(handleLocationSuccess, handleLocationError, {
+                    enableHighAccuracy: true,
+                    timeout: 10000, // 10 seconds
+                    maximumAge: 0 // Force fresh location
+                });
+
+                locationWatchId = navigator.geolocation.watchPosition(
+                    handleLocationSuccess,
+                    handleLocationError,
+                    {
+                        enableHighAccuracy: true, // Try to get a more accurate position
+                        timeout: 15000,         // Maximum time (in milliseconds) to wait for a position
+                        maximumAge: 5000          // Maximum age (in milliseconds) of a cached position that is acceptable
+                    }
+                );
+                isTracking = true;
+                toggleLocationButton.getContainer().firstChild.innerHTML = '🛰️'; // Indicate tracking active
+                if(userLocationMarker) userLocationMarker.getPopup().setContent("Tracking your location...").openOn(map);
+
+            } else {
+                alert("Geolocation is not supported by your browser.");
+            }
+        }
+
+        function stopTracking() {
+            if (navigator.geolocation && locationWatchId !== null) {
+                navigator.geolocation.clearWatch(locationWatchId);
+                locationWatchId = null;
+            }
+            isTracking = false;
+            toggleLocationButton.getContainer().firstChild.innerHTML = '📍'; // Indicate tracking inactive
+            if (userLocationMarker) {
+                 userLocationMarker.getPopup().setContent("Location tracking paused.").openOn(map);
+            }
+        }
+
+        function toggleTracking() {
+            if (isTracking) {
+                stopTracking();
+            } else {
+                startTracking();
+            }
+        }
+
+    });
+</script>
+{% endblock %}

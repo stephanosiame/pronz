@@ -261,3 +261,20 @@ class UserNotificationStatus(models.Model):
     class Meta:
         unique_together = ('user', 'notification') # Ensures a user can only have one status per notification
         ordering = ['-notification__created_at']
+
+class CampusPath(models.Model):
+    path_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255, help_text="Descriptive name for the campus path (e.g., 'Main Entrance to Library Path')")
+    area_id = models.IntegerField(null=True, blank=True, help_text="Identifier for the area this path belongs to, if applicable.")
+    description = models.TextField(blank=True, help_text="Optional description of the path.")
+    geojson_feature = models.JSONField(help_text="GeoJSON feature data for this path, including LineString geometry and properties.")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name or f"Campus Path {self.path_id}"
+
+    class Meta:
+        verbose_name = "Campus Path"
+        verbose_name_plural = "Campus Paths"
+        ordering = ['area_id', 'name']
