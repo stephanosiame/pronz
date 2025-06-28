@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Get Campus Directions</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+        .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        label { display: block; margin-top: 10px; }
+        input[type="text"] { width: calc(100% - 22px); padding: 10px; margin-top: 5px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 10px 15px; background-color: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #218838; }
+        #results { margin-top: 20px; padding: 10px; border: 1px solid #eee; border-radius: 4px; background-color: #e9ecef; }
+        pre { white-space: pre-wrap; word-wrap: break-word; background-color: #fff; padding: 10px; border-radius: 4px; }
+        .error { color: red; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Get Campus Directions (Predefined Routes)</h1>
+        <form id="directionsForm">
+            <div>
+                <label for="fromRoute">From Route:</label>
+                <input type="text" id="fromRoute" name="from_route" placeholder="e.g., Area 1 or 1">
+            </div>
+            <div>
+                <label for="toRoute">To Route:</label>
+                <input type="text" id="toRoute" name="to_route" placeholder="e.g., Area 5 or 5">
+            </div>
+            <button type="submit">Get Directions</button>
+        </form>
+        <div id="results">
+            <p>Direction results will appear here.</p>
+            <p><small>Note: This basic version primarily shows a single route's details. If 'From' and 'To' are different, it will indicate that multi-segment routing isn't supported yet.</small></p>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('directionsForm').addEventListener('submit', function(event) {
+            event.preventDefault();
+            const fromRoute = document.getElementById('fromRoute').value;
+            const toRoute = document.getElementById('toRoute').value;
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<p>Fetching directions...</p>';
+
+            const params = new URLSearchParams();
+            if (fromRoute) params.append('from_route', fromRoute);
+            if (toRoute) params.append('to_route', toRoute);
+
+            fetch(`/api/campus-directions/?${params.toString()}`)
+                .then(response => response.json())
+                .then(data => {
+                    resultsDiv.innerHTML = ''; // Clear previous results
+                    const messageP = document.createElement('p');
+                    messageP.textContent = data.message || 'Received response:';
+                    resultsDiv.appendChild(messageP);
+
+                    if (data.route) {
+                        const routeDetailsDiv = document.createElement('div');
+                        routeDetailsDiv.innerHTML = `
+                            <h3>Route Details: ${data.route.properties.description} (Area ${data.route.properties.area})</h3>
+                            <p><strong>GeoJSON Feature:</strong></p>
+                            <pre>${JSON.stringify(data.route, null, 2)}</pre>
+                        `;
+                        resultsDiv.appendChild(routeDetailsDiv);
+                    } else if (data.message && !data.route) {
+                         // Message already displayed, maybe style it if it's an error-like message
+                        if (data.message.toLowerCase().includes("not found") || data.message.toLowerCase().includes("not yet supported")) {
+                            messageP.classList.add('error');
+                        }
+                    } else {
+                         resultsDiv.innerHTML = `<p class="error">Error: Unexpected response format.</p>`;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    resultsDiv.innerHTML = `<p class="error">An error occurred while fetching data.</p>`;
+                });
+        });
+    </script>
+</body>
+</html>
