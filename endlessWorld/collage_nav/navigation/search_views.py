@@ -282,7 +282,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 @login_required
-@csrf_exempt
+# @csrf_exempt # Removed for better security, ensure frontend sends CSRF token
 @require_http_methods(["POST"])
 def get_locations_in_area(request):
     """

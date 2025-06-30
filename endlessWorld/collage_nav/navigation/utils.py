@@ -386,65 +386,116 @@ def calculate_route(from_location=None, to_location=None, transport_mode='walkin
         return [lrm_route_local]
 
     except (ValueError, nx.NetworkXNoPath, Exception) as local_route_error:
-        logger.warning(f"Local graph routing failed: {local_route_error}. Attempting OSRM fallback.")
-        pass # Fall through to OSRM attempt
+        logger.warning(f"Local graph routing failed: {local_route_error}. Attempting OpenRouteService fallback.")
+        pass # Fall through to OpenRouteService attempt
 
-    # --- Attempt 2: OSRM Fallback (if no admin route and local graph failed) ---
-    logger.info(f"Attempting OSRM fallback for route from '{origin_name}' to '{dest_name}'.")
-    osrm_profile = 'foot'
-    if transport_mode == 'cycling': osrm_profile = 'bike'
-    elif transport_mode == 'driving': osrm_profile = 'car'
+    # --- Attempt 2: OpenRouteService Fallback (if no admin route and local graph failed) ---
+    logger.info(f"Attempting OpenRouteService fallback for route from '{origin_name}' to '{dest_name}'.")
 
-    osrm_base_url = f"http://router.project-osrm.org/route/v1/{osrm_profile}/"
-    start_coords_osrm = f"{origin_point.x},{origin_point.y}"
-    end_coords_osrm = f"{dest_point.x},{dest_point.y}"
-    osrm_url = f"{osrm_base_url}{start_coords_osrm};{end_coords_osrm}?overview=full&steps=true&geometries=geojson"
+    ors_api_key = getattr(settings, 'OPENROUTESERVICE_API_KEY', None)
+    if not ors_api_key or ors_api_key == 'YOUR_ORS_API_KEY_HERE':
+        logger.error("OpenRouteService API key is not configured in settings.")
+        raise ValueError("Map service (OpenRouteService) API key not configured.")
 
-    headers = {'User-Agent': 'CoICTCampusNav/1.0 (Django App)'}
+    ors_profile_map = {
+        'walking': 'foot-walking',
+        'cycling': 'cycling-regular',
+        'driving': 'driving-car'
+    }
+    ors_profile = ors_profile_map.get(transport_mode, 'foot-walking')
+
+    headers = {
+        'Authorization': ors_api_key,
+        'Accept': 'application/json, application/geo+json, application/gpx+xml, img/png; charset=utf-8',
+        'Content-Type': 'application/json; charset=utf-8'
+    }
+
+    # ORS expects coordinates as [longitude, latitude]
+    body = {
+        'coordinates': [[origin_point.x, origin_point.y], [dest_point.x, dest_point.y]],
+        'instructions_format': 'text', # 'html' or 'text'
+        'language': 'en', # Specify language for instructions
+        'preference': 'fastest', # 'fastest', 'shortest', 'recommended'
+        'units': 'm' # 'm' for meters, 'km' for kilometers
+    }
+
+    ors_url = f"https://api.openrouteservice.org/v2/directions/{ors_profile}/geojson"
 
     try:
-        response = requests.get(osrm_url, headers=headers, timeout=15)
-        response.raise_for_status()
-        osrm_data = response.json()
+        response = requests.post(ors_url, json=body, headers=headers, timeout=20)
+        response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
+        ors_data = response.json()
 
-        if osrm_data.get('code') == 'Ok' and osrm_data.get('routes'):
-            osrm_route_obj = osrm_data['routes'][0]
-            distance_meters_osrm = osrm_route_obj.get('distance', 0.0)
-            duration_seconds_osrm = osrm_route_obj.get('duration', 0.0)
-            osrm_geometry = osrm_route_obj.get('geometry', {}).get('coordinates', [])
-            route_path_coords_osrm = [[coord[1], coord[0]] for coord in osrm_geometry]
-            lrm_instructions_osrm = []
-            for leg in osrm_route_obj.get('legs', []):
-                for step in leg.get('steps', []):
-                    lrm_instructions_osrm.append({'text': step.get('maneuver', {}).get('instruction', 'Proceed on path'), 'distance': round(step.get('distance', 0),1), 'time': round(step.get('duration', 0),1)})
+        if ors_data.get('features') and len(ors_data['features']) > 0:
+            route_feature = ors_data['features'][0]
+            summary = route_feature.get('properties', {}).get('summary', {})
+            distance_meters_ors = summary.get('distance', 0.0)  # in meters as per 'units': 'm'
+            duration_seconds_ors = summary.get('duration', 0.0)  # in seconds
 
-            lrm_route_osrm = {
-                'name': f"Route from {origin_name} to {dest_name} (via OSRM)",
-                'summary': {'totalDistance': round(distance_meters_osrm, 2), 'totalTime': round(duration_seconds_osrm, 2)},
-                'coordinates': route_path_coords_osrm,
-                'waypoints': [[origin_point.y, origin_point.x], [dest_point.y, dest_point.x]],
-                'instructions': lrm_instructions_osrm,
-                'source_service': 'osrm_fallback'
+            # Geometry is GeoJSON LineString, coordinates are [lon, lat]
+            geometry_coords = route_feature.get('geometry', {}).get('coordinates', [])
+            # Convert to [lat, lon] for consistency with Leaflet Routing Machine
+            route_path_coords_ors = [[coord[1], coord[0]] for coord in geometry_coords]
+
+            lrm_instructions_ors = []
+            segments = route_feature.get('properties', {}).get('segments', [])
+            if segments:
+                for segment in segments:
+                    for step in segment.get('steps', []):
+                        lrm_instructions_ors.append({
+                            'text': step.get('instruction', 'Proceed on path'),
+                            'distance': round(step.get('distance', 0), 1),  # in meters
+                            'time': round(step.get('duration', 0), 1)  # in seconds
+                        })
+
+            # If no detailed steps, create a general instruction
+            if not lrm_instructions_ors and distance_meters_ors > 0:
+                lrm_instructions_ors.append({
+                    'text': f"Follow the route to {dest_name}.",
+                    'distance': round(distance_meters_ors, 1),
+                    'time': round(duration_seconds_ors, 1)
+                })
+
+
+            lrm_route_ors = {
+                'name': f"Route from {origin_name} to {dest_name} (via OpenRouteService)",
+                'summary': {'totalDistance': round(distance_meters_ors, 2), 'totalTime': round(duration_seconds_ors, 2)},
+                'coordinates': route_path_coords_ors,
+                'waypoints': [[origin_point.y, origin_point.x], [dest_point.y, dest_point.x]], # Leaflet needs [lat, lon]
+                'instructions': lrm_instructions_ors,
+                'source_service': 'openrouteservice'
             }
-            logger.info(f"Successfully calculated route via OSRM: Distance: {distance_meters_osrm:.2f}m")
-            return [lrm_route_osrm]
+            logger.info(f"Successfully calculated route via OpenRouteService: Distance: {distance_meters_ors:.2f}m")
+            return [lrm_route_ors]
         else:
-            error_message = osrm_data.get('message', "OSRM could not find a route or returned an unexpected status.")
-            logger.error(f"OSRM routing unsuccessful: {error_message} (Code: {osrm_data.get('code')})")
+            error_message = "OpenRouteService could not find a route or returned an empty response."
+            if ors_data.get('error'):
+                error_message = ors_data['error'].get('message', error_message)
+            logger.error(f"OpenRouteService routing unsuccessful: {error_message} Response: {ors_data}")
             raise ValueError(f"Map Error: {error_message}")
 
     except requests.exceptions.Timeout:
-        logger.error(f"OSRM request timed out: {osrm_url}")
-        raise ValueError("Map service (OSRM) request timed out. Please try again.")
+        logger.error(f"OpenRouteService request timed out: {ors_url}")
+        raise ValueError("Map service (OpenRouteService) request timed out. Please try again.")
+    except requests.exceptions.HTTPError as http_err:
+        # Attempt to get more specific error message from ORS response
+        error_details = ""
+        try:
+            err_json = http_err.response.json()
+            error_details = err_json.get("error", {}).get("message", str(http_err))
+        except json.JSONDecodeError:
+            error_details = str(http_err)
+        logger.error(f"OpenRouteService HTTP error: {error_details} (Status: {http_err.response.status_code}) URL: {ors_url}")
+        raise ValueError(f"Map service (OpenRouteService) error: {error_details}")
     except requests.exceptions.RequestException as e:
-        logger.error(f"OSRM request failed: {e}")
-        raise ValueError(f"Could not connect to map service (OSRM). Please check internet connection and try again.")
+        logger.error(f"OpenRouteService request failed: {e}")
+        raise ValueError(f"Could not connect to map service (OpenRouteService). Please check internet connection and try again.")
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
-        logger.error(f"Error parsing OSRM response: {e}", exc_info=True) # Added exc_info
-        raise ValueError("Failed to understand route data from map service (OSRM).")
+        logger.error(f"Error parsing OpenRouteService response: {e}", exc_info=True)
+        raise ValueError("Failed to understand route data from map service (OpenRouteService).")
     except Exception as e:
-        logger.error(f"Unexpected error during OSRM routing: {e}", exc_info=True)
-        raise ValueError("An unexpected error occurred with the external map service (OSRM).")
+        logger.error(f"Unexpected error during OpenRouteService routing: {e}", exc_info=True)
+        raise ValueError("An unexpected error occurred with the external map service (OpenRouteService).")
 
 
 def generate_random_route(from_point, to_point):

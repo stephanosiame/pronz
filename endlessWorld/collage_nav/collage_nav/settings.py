@@ -70,6 +70,9 @@ TWILIO_ACCOUNT_SID = config('AC3354d9343c8a851019072e9c6d16be73', default='AC335
 TWILIO_AUTH_TOKEN = config('eaa80f632bcfefb238f456a6776d1cd9', default='eaa80f632bcfefb238f456a6776d1cd9')
 TWILIO_PHONE_NUMBER = config('+255740471547', default='+255740471547')
 
+# OpenRouteService API Key
+OPENROUTESERVICE_API_KEY = config('OPENROUTESERVICE_API_KEY', default='YOUR_ORS_API_KEY_HERE')
+
 # Celery Configuration
 CELERY_BROKER_URL = 'redis://localhost:6379/0'
 CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
