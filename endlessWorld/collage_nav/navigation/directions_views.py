@@ -98,11 +98,29 @@ def get_directions(request):
                         transport_mode=transport_mode, timestamp=timezone.now()
                     )
                     if request.user.notifications_enabled and actual_route_info.get('summary', {}).get('totalDistance', 0) > 500:
-                        distance_km = actual_route_info.get('summary', {}).get('totalDistance',0) / 1000
-                        time_min = actual_route_info.get('summary', {}).get('totalTime',0) / 60
-                        message_sms = f"Campus route to {to_location_obj.name} is {distance_km:.1f}km. Est. time: {time_min:.0f} min."
-                        send_sms(request.user.phone_number, message_sms)
-                        SMSAlert.objects.create(user=request.user, message=message_sms, alert_type='navigation', is_sent=True, sent_at=timezone.now())
+                        distance_m = actual_route_info.get('summary', {}).get('totalDistance', 0)
+                        time_s = actual_route_info.get('summary', {}).get('totalTime', 0)
+
+                        distance_km = distance_m / 1000
+                        time_min = time_s / 60
+
+                        source_service = actual_route_info.get('source_service', 'unknown')
+
+                        message_sms = f"CoICT Nav: Route to {to_location_obj.name} ({distance_km:.1f}km, {time_min:.0f} min)."
+                        if source_service == 'openrouteservice':
+                            message_sms += " (General map used)"
+
+                        # Truncate message if too long
+                        message_sms = message_sms[:157] + "..." if len(message_sms) > 160 else message_sms
+
+                        sms_sent_successfully = send_sms(request.user.phone_number, message_sms)
+                        SMSAlert.objects.create(
+                            user=request.user,
+                            message=message_sms,
+                            alert_type='navigation',
+                            is_sent=sms_sent_successfully,
+                            sent_at=timezone.now() if sms_sent_successfully else None
+                        )
                 return JsonResponse(response_payload)
             else:
                 logger.error("get_directions: calculate_route did not return valid route data or an exception.")
